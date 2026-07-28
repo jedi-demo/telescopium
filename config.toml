@@ -1,0 +1,92 @@
+[satellites.TTiQLSatellite.TTiQL]
+type = "TTiQLSatellite"
+ip = "192.168.0.101"
+enable_ch1 = false
+voltage1 = 0.0
+current_limit1 = 1.0
+ovp1 = 40.0
+ocp1 = 5.5
+enable_ch2 = true
+voltage2 = 3.0
+current_limit2 = 1.0
+ovp2 = 40.0
+ocp2 = 5.5
+launch_order = ["both"]
+delay_between = 1.0
+start_delay = 0.0
+ramp_ch1 = false
+ramp_ch2 = true
+ramp_step = 1.0
+ramp_delay = 1.0
+_conditions.require_stopping_after = ["TTiQLSatellite.TTiQL2"]
+_conditions.require_landing_after = ["TTiQLSatellite.TTiQL2"]
+
+[satellites.TTiQLSatellite.TTiQL2]
+type = "TTiQLSatellite"
+ip = "192.168.0.102"
+enable_ch1 = true
+voltage1 = 5.0
+current_limit1 = 1.0
+ovp1 = 40.0
+ocp1 = 5.5
+enable_ch2 = true
+voltage2 = 1.8
+current_limit2 = 0.5
+ovp2 = 40.0
+ocp2 = 5.5
+launch_order = [2, 1]
+delay_between = 1.0
+start_delay = 4.0
+ramp_ch1 = false
+ramp_ch2 = false
+ramp_step = 1.0
+ramp_delay = 1.0
+_conditions.require_launching_after = ["TTiQLSatellite.TTiQL"]
+_conditions.require_starting_after = ["TTiQLSatellite.TTiQL"]
+
+[satellites.Influx.DB]
+org = "Pixlab"
+#bucket = "TTi"
+token = "WJ2nUFCBc4Qz7hCh4Ztv_C2xa4WlXbZIN28n2EorHEj_weuUV0r9Y3cV9YJHEA288YdUigGZQn26lgTyuwmyFg=="
+# PJP0-gxun23D0yJ_rvqeNvpm2tJPGgeWCUojm2DNkYEPxS7V3XCBuqniIiWPWQtITKXr20ArIIgO3t094IhDGQ==
+
+[satellites.TJMonoPix2.chip0]
+chip_sn = 'W15R12'
+start_column = 300
+stop_column = 400
+start_row = 0
+stop_row = 512
+max_triggers = 10   # Number of maximum received triggers after stopping readout, if False no limit on received trigger
+send_data= "tcp://127.0.0.1:5500" # Socket address of online monitor
+output_directory = "delete this line"
+_conditions.require_launching_after = ["TTiQLSatellite.TTiQL2"]
+_conditions.require_starting_after = ["TTiQLSatellite.TTiQL2"]
+
+[satellites.TJMonoPix2.chip1]
+chip_sn = 'W05R24'
+start_column = 300
+stop_column = 305
+start_row = 0
+stop_row = 512
+max_triggers = 10   # Number of maximum received triggers after stopping readout, if False no limit on received trigger
+send_data= "tcp://127.0.0.1:5500" # Socket address of online monitor
+_conditions.require_launching_after = ["TTiQLSatellite.TTiQL2"]
+_conditions.require_starting_after = ["TTiQLSatellite.TTiQL2"]
+
+[satellites.TJMonoPix2.chip0._data]
+bor_timeout = 30
+data_timeout = 30
+eor_timeout = 30
+
+[satellites.Keithley.2410]
+device = "2410"
+port = "/dev/ttyUSB0"
+terminal = "front"
+voltage = 3.0
+voltage_step = 1.0
+settle_time = 1.0
+ovp = 20.0
+compliance = 0.1
+
+[satellites.TJMonopix2H5Receiver.chip0]
+output_directory = "/home/pixlab/jiddon"
