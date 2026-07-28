@@ -1,6 +1,5 @@
 from constellation.core.configuration import Configuration
 from constellation.core.protocol.cscp1 import SatelliteState
-from constellation.core.message.cdtp2 import DataRecord
 from constellation.core.monitoring import schedule_metric
 from constellation.core.transmitter_satellite import TransmitterSatellite
 
@@ -8,22 +7,20 @@ import os
 import sys
 import threading
 import time
-from itertools import count
 from typing import Any
-from queue import Full
 
+import numpy as np
 import yaml
 
 from tjmonopix2.scans.scan_source import SourceScan
 from tjmonopix2.system.fifo_readout import FifoReadout, NoDataTimeout
 
+
 class CustomFifoReadout(FifoReadout):
-    """Read FIFO and forward only to Constellation DataRecords."""
-    def __init__(self, daq, send_record=None, record_tag_factory=None):
+    def __init__(self, daq, send_array=None, record_tag_factory=None):
         super().__init__(daq)
-        self.send_record = send_record
+        self.send_array = send_array
         self.record_tag_factory = record_tag_factory
-        self._sequence_counter = count()
 
     def _make_tags(self, timestamp_begin, timestamp_end, status, n_words):
         if self.record_tag_factory is not None:
@@ -40,15 +37,6 @@ class CustomFifoReadout(FifoReadout):
             "error": status,
             "n_words": n_words,
         }
-
-    def _make_data_record(self, data, timestamp_begin, timestamp_end, status):
-        seq = next(self._sequence_counter)
-        record = DataRecord(
-            sequence_number=seq,
-            tags=self._make_tags(timestamp_begin, timestamp_end, status, int(data.shape[0])),
-        )
-        record.add_block(data.tobytes())
-        return record
 
     def start(self, errback=None, reset_rx=False, reset_sram_fifo=False, no_data_timeout=None, fill_buffer=False):
         if self._is_running:
@@ -69,20 +57,18 @@ class CustomFifoReadout(FifoReadout):
         self.force_stop.clear()
 
         if self.errback:
-            self.watchdog_thread = threading.Thread(target=self.watchdog, name="WatchdogThread")
-            self.watchdog_thread.daemon = True
+            self.watchdog_thread = threading.Thread(target=self.watchdog, name="WatchdogThread", daemon=True)
             self.watchdog_thread.start()
 
         self.readout_thread = threading.Thread(
             target=self.readout,
             name="ReadoutThread",
             kwargs={"no_data_timeout": no_data_timeout},
+            daemon=True,
         )
-        self.readout_thread.daemon = True
         self.readout_thread.start()
 
         self._is_running = True
-
 
     def readout(self, no_data_timeout=None):
         self.log.debug("Starting %s", self.readout_thread.name)
@@ -117,22 +103,10 @@ class CustomFifoReadout(FifoReadout):
 
                 timestamp_begin, timestamp_end = self.update_timestamp()
                 status = 0
+                tags = self._make_tags(timestamp_begin, timestamp_end, status, int(n_words))
 
-                if self.send_record is not None:
-                    record = self._make_data_record(
-                        data=data,
-                        timestamp_begin=timestamp_begin,
-                        timestamp_end=timestamp_end,
-                        status=status,
-                    )
-                    self.send_record(record)
-       
-                    while not self.stop_readout.is_set() and not self.force_stop.is_set():
-                        try:
-                            self.constellation_data_queue.put(record, timeout=0.1)
-                            break
-                        except Full:
-                            continue
+                if self.send_array is not None:
+                    self.send_array(data, tags)
 
                 self._words_per_read.append(n_words)
 
@@ -145,16 +119,18 @@ class CustomFifoReadout(FifoReadout):
 
         self.log.debug("Stopped %s", self.readout_thread.name)
 
+
 class CustomSourceScan(SourceScan):
-    def __init__(self, *args, constellation_data_queue=None, record_tag_factory=None, **kwargs):
+    def __init__(self, *args, send_array=None, record_tag_factory=None, **kwargs):
         super().__init__(*args, **kwargs)
-        self.constellation_data_queue = constellation_data_queue
+        self.send_array = send_array
         self.record_tag_factory = record_tag_factory
 
     def _configure_fifo_readout(self):
+        self.log.info("_configure_fifo_readout: installing CustomFifoReadout")
         self.fifo_readout = CustomFifoReadout(
             self.daq,
-            send_record=self.constellation_data_queue,
+            send_array=self.send_array,
             record_tag_factory=self.record_tag_factory,
         )
         self._first_read = False
@@ -164,7 +140,22 @@ class TJMonopix2(TransmitterSatellite):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.src_scan = None
-        self.constellation_data_queue = getattr(self, "data_queue", None)
+        self.thread_scan = None
+
+    def _send_array(self, data, tags):
+        if not self.can_send_record():
+            self.log.warning("Cannot send record right now, dropping chunk with %d words", data.shape[0])
+            return
+
+        record = self.new_data_record(tags)
+        record.add_block(data.tobytes())
+        self.log.info(
+            "Sending DataRecord n_words=%d dtype=%s source=%s",
+            int(data.shape[0]),
+            tags.get("dtype"),
+            tags.get("source", "daq"),
+        )
+        self.send_data_record(record)
 
     def _record_tag_factory(self, timestamp_begin, timestamp_end, status, n_words):
         return {
@@ -175,13 +166,14 @@ class TJMonopix2(TransmitterSatellite):
             "n_words": n_words,
             "trigger_mode": self.scan_configuration.get("trigger_mode"),
             "chip_sn": self.bench_conf["modules"]["module_0"]["chip_0"].get("chip_sn"),
+            "source": "daq",
         }
 
     def _make_scan(self):
         return CustomSourceScan(
             scan_config=self.scan_configuration,
             bench_config=self.bench_conf,
-            constellation_data_queue=self.constellation_data_queue,
+            send_array=self._send_array,
             record_tag_factory=self._record_tag_factory,
         )
 
@@ -189,48 +181,24 @@ class TJMonopix2(TransmitterSatellite):
         try:
             if self.src_scan is not None:
                 self.src_scan.close()
-        except AttributeError:
-            pass
+        except Exception:
+            self.log.exception("Ignoring exception while closing existing scan during initialization")
 
         self._load_config(config)
         self.src_scan = self._make_scan()
         return "initializing done"
 
-    # def do_launching(self) -> str:
-    #     time.sleep(10)
-    #     self.src_scan.init()
-    #     self.src_scan._init_environment()
-    #     self.src_scan._init_hardware(force=False)
-    #     self.src_scan.initialized = True
-    #     self.src_scan.configure()
-    #     return "launching done"
     def do_launching(self) -> str:
-        self.log.info("do_launching: enter")
         time.sleep(30)
         try:
             if self.src_scan is None:
                 raise RuntimeError("src_scan is None before launch")
 
-            self.log.info("do_launching: src_scan=%r", self.src_scan)
-
-            self.log.info("do_launching: calling init()")
             self.src_scan.init()
-            self.log.info("do_launching: init() done")
-
-            self.log.info("do_launching: calling _init_environment()")
             self.src_scan._init_environment()
-            self.log.info("_init_environment() done")
-
-            self.log.info("do_launching: calling _init_hardware(force=False)")
             self.src_scan._init_hardware(force=False)
-            self.log.info("_init_hardware() done")
-
-            self.log.info("do_launching: setting initialized=True")
             self.src_scan.initialized = True
-
-            self.log.info("do_launching: calling configure()")
             self.src_scan.configure()
-            self.log.info("do_launching: configure() done")
 
             return "launching done"
 
@@ -238,9 +206,35 @@ class TJMonopix2(TransmitterSatellite):
             self.log.exception("do_launching failed")
             raise
 
-    def do_run(self, payload=None) -> str:
-        self.src_scan._init_files()
 
+    def send_test_packets(self, payload=None) -> str:
+        self.log.info("synthetic Constellation send test start")
+
+        for i in range(5):
+            if self.stop_requested():
+                break
+
+            data = np.array([i, i + 1, i + 2, i + 3], dtype=np.uint32)
+            tags = {
+                "dtype": "uint32",
+                "timestamp_begin": time.time(),
+                "timestamp_end": time.time(),
+                "error": 0,
+                "n_words": int(data.size),
+                "source": "synthetic-test",
+            }
+
+            self.log.info("sending synthetic test record %d", i)
+            self._send_array(data, tags)
+            time.sleep(1)
+
+        self.log.info("finished synthetic send loop")
+        return "Finished test"
+
+    def do_run(self, payload=None) -> str:
+        self.send_test_packets()
+
+        self.src_scan._init_files()
         if hasattr(self.src_scan, "stop_scan"):
             self.src_scan.stop_scan.clear()
 
@@ -251,34 +245,40 @@ class TJMonopix2(TransmitterSatellite):
         self.thread_scan.start()
 
         try:
-            while not self._state_thread_evt.is_set():
+            while not self.stop_requested():
                 time.sleep(0.2)
         finally:
             if hasattr(self.src_scan, "stop_scan"):
                 self.src_scan.stop_scan.set()
 
+            # if getattr(self.src_scan, "fifo_readout", None) is not None:
+            #     self.src_scan.fifo_readout.stop_readout.set()
+            #     self.src_scan.fifo_readout.force_stop.set()
+            #
+            # if self.thread_scan is not None and self.thread_scan.is_alive():
+            #     self.thread_scan.join(timeout=30)
+
         return "running done"
 
     def do_stop(self) -> str:
-        self.log.info("Stopping run")
         if hasattr(self.src_scan, "stop_scan"):
             self.src_scan.stop_scan.set()
-        self.log.info("here1")
 
-        if self.src_scan.fifo_readout is not None:
+        if getattr(self.src_scan, "fifo_readout", None) is not None:
             self.src_scan.fifo_readout.stop_readout.set()
             self.src_scan.fifo_readout.force_stop.set()
 
-        self.log.info("here2")
-        if self.thread_scan.is_alive():
+        if self.thread_scan is not None and self.thread_scan.is_alive():
             self.thread_scan.join(timeout=10)
 
 
-        return "stopped"
-
     def do_reconfigure(self, config: Configuration) -> str:
         if self.src_scan is not None:
-            self.src_scan.close()
+            try:
+                self.src_scan.close()
+            except Exception:
+                self.log.exception("Ignoring exception while closing existing scan during reconfigure")
+
         self._load_config(config)
         self.src_scan = self._make_scan()
         self.src_scan.init()
@@ -318,6 +318,6 @@ class TJMonopix2(TransmitterSatellite):
 
     @schedule_metric("", 1)
     def trigger_number(self) -> Any:
-        if self.fsm.current_state_value == SatelliteState.RUN:
+        if self.fsm.current_state_value == SatelliteState.RUN and self.src_scan is not None:
             return self.src_scan.daq.get_trigger_counter()
         return None
