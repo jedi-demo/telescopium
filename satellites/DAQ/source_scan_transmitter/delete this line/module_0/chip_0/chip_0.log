@@ -1,0 +1,20 @@
+2026-07-28 11:08:28,843 [CustomSourceScan ] - WARNING No explicit configuration supplied for chip W15R12. Using '/home/pixlab/jiddon/telescopium/tj-monopix2-daq/tjmonopix2/system/../system/default.cfg.yaml'!
+2026-07-28 11:08:28,843 [CustomSourceScan ] - INFO    Loading chip configuration for chip W15R12 from /home/pixlab/jiddon/telescopium/tj-monopix2-daq/tjmonopix2/system/../system/default.cfg.yaml
+2026-07-28 11:08:28,844 [CustomSourceScan ] - INFO    Found 1 chip(s) of 1 module(s) defined in the testbench
+2026-07-28 11:08:28,844 [CustomSourceScan ] - INFO    Initializing CustomSourceScan...
+2026-07-28 11:08:28,844 [CustomSourceScan ] - INFO    Run scan on all chips in parallel
+2026-07-28 11:08:28,934 [TJ-Monopix2      ] - SUCCESS Found board BDAQ53 running firmware version 0.2
+2026-07-28 11:08:29,265 [CustomSourceScan ] - INFO    Initializing chips...
+2026-07-28 11:08:29,265 [TJ-Monopix2 - W15R12] - INFO    Initializing communication...
+2026-07-28 11:08:29,267 [TJ-Monopix2 - W15R12] - SUCCESS Communication established
+2026-07-28 11:08:32,536 [CustomSourceScan ] - INFO    Loading chip configuration for chip W15R12 from /home/pixlab/jiddon/telescopium/tj-monopix2-daq/tjmonopix2/system/../system/default.cfg.yaml
+2026-07-28 11:08:32,536 [CustomSourceScan ] - INFO    Loading chip configuration for chip W15R12 from /home/pixlab/jiddon/telescopium/tj-monopix2-daq/tjmonopix2/system/../system/default.cfg.yaml
+2026-07-28 11:08:32,537 [CustomSourceScan ] - INFO    Found 1 chip(s) of 1 module(s) defined in the testbench
+2026-07-28 11:08:32,537 [CustomSourceScan ] - INFO    Found 1 chip(s) of 1 module(s) defined in the testbench
+2026-07-28 11:08:32,537 [CustomSourceScan ] - INFO    Initializing CustomSourceScan...
+2026-07-28 11:08:32,537 [CustomSourceScan ] - INFO    Initializing CustomSourceScan...
+2026-07-28 11:08:32,537 [CustomSourceScan ] - INFO    Run scan on all chips in parallel
+2026-07-28 11:08:32,537 [CustomSourceScan ] - INFO    Run scan on all chips in parallel
+2026-07-28 11:08:32,556 [CustomSourceScan ] - INFO    Hardware already initialized, skip initialization!
+2026-07-28 11:08:32,556 [CustomSourceScan ] - INFO    Hardware already initialized, skip initialization!
+2026-07-28 11:08:32,556 [CustomSourceScan ] - INFO    Configuring chip W15R12...

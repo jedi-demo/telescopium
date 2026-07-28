@@ -251,13 +251,6 @@ class TJMonopix2(TransmitterSatellite):
             if hasattr(self.src_scan, "stop_scan"):
                 self.src_scan.stop_scan.set()
 
-            # if getattr(self.src_scan, "fifo_readout", None) is not None:
-            #     self.src_scan.fifo_readout.stop_readout.set()
-            #     self.src_scan.fifo_readout.force_stop.set()
-            #
-            # if self.thread_scan is not None and self.thread_scan.is_alive():
-            #     self.thread_scan.join(timeout=30)
-
         return "running done"
 
     def do_stop(self) -> str:
