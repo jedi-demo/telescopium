@@ -88,5 +88,5 @@ settle_time = 1.0
 ovp = 20.0
 compliance = 0.1
 
-[satellites.TJMonopix2H5Receiver.chip0]
+[satellites.TJMonopix2H5Receiver.receiver]
 output_directory = "/home/pixlab/jiddon"

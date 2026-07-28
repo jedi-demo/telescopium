@@ -283,7 +283,7 @@ class TJMonopix2(TransmitterSatellite):
         config.set_default(key="chip_config_file", value=None)
         config.set_default(
             key="testbench_path",
-            value=os.path.join(os.path.dirname(__file__), "../..", "testbench.yaml"),
+            value=os.path.join(os.path.dirname(__file__), "../../..", "testbench.yaml"),
         )
         config.set_default(key="scan_timeout", value=False)
         config.set_default(key="send_data", value="tcp://127.0.0.1:5500")
