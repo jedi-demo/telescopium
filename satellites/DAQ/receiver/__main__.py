@@ -1,6 +1,6 @@
 from constellation.core.logging import setup_cli_logging
 from constellation.core.satellite import SatelliteArgumentParser
-from tj_receiver import TJMonopix2H5Receiver
+from .tj_receiver import TJMonopix2H5Receiver
 
 
 def main(args=None):
