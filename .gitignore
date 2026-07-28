@@ -1,2 +1,6 @@
 output_data/
 __pycache__/
+Constellation/
+basil/
+tj-monopix2-daq/
+venv/
