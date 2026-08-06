@@ -10,8 +10,8 @@ usage() {
 
 launch_one() {
     local app="$1"
-    "$app" -g dcs -name DCS &
-    "$app" -g daq -name DAQ &
+    "$app" -g dcs &
+    "$app" -g daq &
 }
 
 case "$1" in

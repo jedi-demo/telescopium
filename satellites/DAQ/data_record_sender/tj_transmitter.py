@@ -136,7 +136,7 @@ class CustomSourceScan(SourceScan):
         self._first_read = False
 
 
-class TJMonopix2(TransmitterSatellite):
+class FakePacketSender(TransmitterSatellite):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.src_scan = None
@@ -189,24 +189,9 @@ class TJMonopix2(TransmitterSatellite):
         return "initializing done"
 
     def do_launching(self) -> str:
-        try:
-            if self.src_scan is None:
-                raise RuntimeError("src_scan is None before launch")
+        pass
 
-            self.src_scan.init()
-            self.src_scan._init_environment()
-            self.src_scan._init_hardware(force=False)
-            self.src_scan.initialized = True
-            self.src_scan.configure()
-
-            return "launching done"
-
-        except Exception:
-            self.log.exception("do_launching failed")
-            raise
-
-
-    def send_test_packets(self, payload=None) -> str:
+    def do_run(self, payload=None) -> str:
         self.log.info("synthetic Constellation send test start")
 
         for i in range(5):
@@ -230,27 +215,6 @@ class TJMonopix2(TransmitterSatellite):
         self.log.info("finished synthetic send loop")
         return "Finished test"
 
-    def do_run(self, payload=None) -> str:
-        self.send_test_packets()
-
-        self.src_scan._init_files()
-        if hasattr(self.src_scan, "stop_scan"):
-            self.src_scan.stop_scan.clear()
-
-        self.thread_scan = threading.Thread(
-            target=self.src_scan.scan,
-            name="TJMonopix2ScanThread",
-        )
-        self.thread_scan.start()
-
-        try:
-            while not self.stop_requested():
-                time.sleep(0.2)
-        finally:
-            if hasattr(self.src_scan, "stop_scan"):
-                self.src_scan.stop_scan.set()
-
-        return "running done"
 
     def do_stop(self) -> str:
         if hasattr(self.src_scan, "stop_scan"):

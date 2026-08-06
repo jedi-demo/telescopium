@@ -37,12 +37,18 @@ SESSIONS = {
                 group="dcs",
                 name="TTiQL2",
             ),            
+            Satellite(
+                window="Influx",
+                module="DCS.Influx",
+                group="dcs",
+                name="DB",
+            ),
             # Satellite(
             #     window="Keithley2410",
             #     module="DCS.Keithley",
             #     group="dcs",
             #     name="Keithley2410",
-            # ),
+            # ),        
         ],
     },
     "daq": {
@@ -68,10 +74,10 @@ SESSIONS = {
                 name="chip0",
             ),
             Satellite(
-                window="Influx",
-                module="DAQ.Influx",
+                window="fake_data_chip1",
+                module="DAQ.data_record_sender",
                 group="daq",
-                name="DB",
+                name="chip1",
             ),
         ],
     },
@@ -102,13 +108,24 @@ def kill_tmux_session(session_name: str, dry_run: bool = False) -> None:
 def build_satellite_command(base_dir: Path, sat: Satellite, python_bin: str) -> str:
     return (
         f"cd {shlex.quote(str(base_dir))} && "
-        f"exec {shlex.quote(python_bin)} -m {shlex.quote(sat.module)} "
+        f"{shlex.quote(python_bin)} -m {shlex.quote(sat.module)} "
         f"-g {shlex.quote(sat.group)} -n {shlex.quote(sat.name)}"
     )
 
 
-def create_tmux_session(session_name: str, first_sat: Satellite, python_bin: str, dry_run: bool = False) -> None:
-    cmd = build_satellite_command(BASE_DIR, first_sat, python_bin)
+def build_tmux_shell_command(base_dir: Path) -> str:
+    return f"cd {shlex.quote(str(base_dir))} && exec bash"
+
+
+def create_tmux_session(
+    session_name: str,
+    first_sat: Satellite,
+    python_bin: str,
+    dry_run: bool = False,
+) -> None:
+    shell_cmd = build_tmux_shell_command(BASE_DIR)
+    sat_cmd = build_satellite_command(BASE_DIR, first_sat, python_bin)
+
     run(
         [
             "tmux",
@@ -118,8 +135,33 @@ def create_tmux_session(session_name: str, first_sat: Satellite, python_bin: str
             session_name,
             "-n",
             first_sat.window,
-            cmd,
+            shell_cmd,
         ],
+        check=True,
+        dry_run=dry_run,
+    )
+    run(
+            [
+                "tmux",
+                "set-option",
+                "-t",
+                f"{session_name}:{first_sat.window}",
+                "remain-on-exit",
+                "on",
+            ],
+            check=True,
+            dry_run=dry_run,
+        )
+    run(
+        [
+            "tmux",
+            "send-keys",
+            "-t",
+            f"{session_name}:{first_sat.window}",
+            sat_cmd,
+            "Enter",
+        ],
+        check=True,
         dry_run=dry_run,
     )
 
@@ -215,6 +257,7 @@ def start_group(group_key: str, python_bin: str, kill_existing: bool, dry_run: b
             )
 
     create_tmux_session(session_name, satellites[0], python_bin, dry_run=dry_run)
+    print(f"created ----------------------{session_name}")
     for sat in satellites[1:]:
         add_tmux_window(session_name, sat, python_bin, dry_run=dry_run)
 

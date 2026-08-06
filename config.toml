@@ -11,7 +11,7 @@ voltage2 = 3.0
 current_limit2 = 1.0
 ovp2 = 40.0
 ocp2 = 5.5
-launch_order = ["both"]
+launch_order = [2,1]
 delay_between = 1.0
 start_delay = 0.0
 ramp_ch1 = false
@@ -59,7 +59,7 @@ stop_row = 512
 max_triggers = 10   # Number of maximum received triggers after stopping readout, if False no limit on received trigger
 send_data= "tcp://127.0.0.1:5500" # Socket address of online monitor
 
-[TJMonoPix2.chip1]
+[FakePacketSender.chip1]
 chip_sn = 'W05R24'
 start_column = 300
 stop_column = 305
