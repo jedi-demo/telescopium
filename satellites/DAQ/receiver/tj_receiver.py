@@ -1,11 +1,22 @@
 """
 TJ-Monopix2 Constellation receiver satellite.
 
-Receives DataRecord objects from transmitter satellites and stores
-TJ-Monopix2 FIFO payloads into an HDF5 file.
+    /
+      receiver_metadata/
+      <sender>/
+        BOR/
+          user_tags/                 attributes
+          configuration/             flattened attributes
+        data                         one appendable raw-data dataset
+        meta_data/                   appendable record metadata datasets
+        EOR/
+          user_tags/                 attributes
+          run_metadata/              flattened attributes
+
 """
 
 import datetime
+import json
 import os
 import pathlib
 from typing import Any
@@ -21,7 +32,7 @@ from constellation.core.receiver_satellite import ReceiverSatellite
 
 
 class TJMonopix2H5Receiver(ReceiverSatellite):
-    """Receiver satellite writing TJ-Monopix2 DataRecords to HDF5."""
+    """Receiver satellite writing scan_base-style HDF5 files."""
 
     def do_initializing(self, config: Configuration) -> str:
         self.output_directory = config.get_path("output_directory")
@@ -29,11 +40,12 @@ class TJMonopix2H5Receiver(ReceiverSatellite):
         self.last_flush = None
         self.outfile = None
         self.record_counts = {}
+        self._seen_eor = set()
         return f"Initialized receiver, output directory: {self.output_directory}"
 
     def do_starting(self, run_identifier: str) -> str:
         self._seen_eor = set()
-        self.last_flush = datetime.datetime.now()
+        self.last_flush = datetime.datetime.now(datetime.UTC)
         self.record_counts = {}
         self.outfile = self._open_file(f"tjmonopix2_{run_identifier}.h5")
         return f"Started run {run_identifier}"
@@ -55,58 +67,197 @@ class TJMonopix2H5Receiver(ReceiverSatellite):
             pass
         return "Receiver failed gracefully"
 
-    def receive_bor(self, sender: str, user_tags: dict[str, Any], configuration: dict[str, Any]) -> None:
+    def receive_bor(
+        self,
+        sender: str,
+        user_tags: dict[str, Any],
+        configuration: dict[str, Any],
+    ) -> None:
+        """Store the beginning-of-run metadata for a sender."""
         sender_grp = self.outfile.require_group(sender)
-        bor_grp = sender_grp.create_group("BOR")
-        bor_grp.create_group("user_tags").attrs.update(self._attrs_convert(user_tags))
-        bor_grp.create_group("configuration").attrs.update(self._attrs_convert(configuration))
+        bor_grp = sender_grp.require_group("BOR")
 
-        if sender not in self.record_counts:
-            self.record_counts[sender] = 0
+        bor_grp.require_group("user_tags").attrs.update(
+            self._attrs_convert(user_tags)
+        )
+        bor_grp.require_group("configuration").attrs.update(
+            self._attrs_convert(configuration)
+        )
+
+        self._require_data_nodes(sender_grp)
+
+        self.record_counts.setdefault(sender, 0)
 
     def receive_data(self, sender: str, data_record: DataRecord) -> None:
+        """Append all blocks in a DataRecord to one sender data dataset."""
         sender_grp = self.outfile.require_group(sender)
-
-        if sender not in self.record_counts:
-            self.record_counts[sender] = 0
-
-        data_grp = sender_grp.create_group(f"data_{data_record.sequence_number:09}")
-        data_grp.attrs["sequence_number"] = data_record.sequence_number
-        data_grp.attrs.update(self._attrs_convert(data_record.tags))
+        data_dset, meta_grp = self._require_data_nodes(sender_grp)
 
         dtype = np.dtype(data_record.tags.get("dtype", np.uint32))
-
-        for block_idx, block in enumerate(data_record.blocks):
-            arr = np.frombuffer(block, dtype=dtype)
-            dset = data_grp.create_dataset(
-                f"block_{block_idx:02}",
-                data=arr,
-                chunks=True,
-                compression="gzip",
-                compression_opts=1,
+        if data_dset.dtype != dtype:
+            raise TypeError(
+                f"Inconsistent dtype for sender {sender!r}: "
+                f"existing={data_dset.dtype}, new={dtype}"
             )
-            dset.attrs["dtype"] = str(dtype)
-            dset.attrs["n_items"] = arr.shape[0]
 
-        self.record_counts[sender] += 1
+        arrays = [
+            np.frombuffer(block, dtype=dtype)
+            for block in data_record.blocks
+        ]
 
-        if self.flush_interval > 0:
-            elapsed = (datetime.datetime.now() - self.last_flush).total_seconds()
-            if elapsed > self.flush_interval:
-                self.outfile.flush()
-                self.last_flush = datetime.datetime.now()
+        if arrays:
+            new_data = np.concatenate(arrays)
+            index_start = int(data_dset.shape[0])
+            index_stop = index_start + int(new_data.shape[0])
 
-    def receive_eor(self, sender: str, user_tags: dict[str, Any], run_metadata: dict[str, Any]) -> None:
+            data_dset.resize((index_stop,))
+            data_dset[index_start:index_stop] = new_data
+        else:
+            index_start = int(data_dset.shape[0])
+            index_stop = index_start
+
+        self._append_metadata(
+            meta_grp,
+            sequence_number=data_record.sequence_number,
+            index_start=index_start,
+            index_stop=index_stop,
+            data_length=index_stop - index_start,
+            n_blocks=len(data_record.blocks),
+            tags=data_record.tags,
+        )
+
+        self.record_counts[sender] = self.record_counts.get(sender, 0) + 1
+        self._flush_if_due()
+
+    def receive_eor(
+        self,
+        sender: str,
+        user_tags: dict[str, Any],
+        run_metadata: dict[str, Any],
+    ) -> None:
+        """Store the end-of-run metadata for a sender."""
         if sender in self._seen_eor:
-            self.log.warning("Duplicate EOR received from %s, ignoring second EOR", sender)
+            self.log.warning(
+                "Duplicate EOR received from %s, ignoring second EOR", sender
+            )
             return
 
         sender_grp = self.outfile.require_group(sender)
         eor_grp = sender_grp.require_group("EOR")
-        eor_grp.require_group("user_tags").attrs.update(self._attrs_convert(user_tags))
-        eor_grp.require_group("run_metadata").attrs.update(self._attrs_convert(run_metadata))
+
+        eor_grp.require_group("user_tags").attrs.update(
+            self._attrs_convert(user_tags)
+        )
+        eor_grp.require_group("run_metadata").attrs.update(
+            self._attrs_convert(run_metadata)
+        )
 
         self._seen_eor.add(sender)
+        self.outfile.flush()
+
+    def _require_data_nodes(
+        self,
+        sender_grp: h5py.Group,
+        dtype: np.dtype | None = None,
+    ) -> tuple[h5py.Dataset, h5py.Group]:
+        """Create or retrieve the appendable data and metadata nodes."""
+        if "data" not in sender_grp:
+            if dtype is None:
+                dtype = np.dtype(np.uint32)
+
+            data_dset = sender_grp.create_dataset(
+                "data",
+                shape=(0,),
+                maxshape=(None,),
+                dtype=dtype,
+                chunks=True,
+                compression="gzip",
+                compression_opts=1,
+            )
+            data_dset.attrs["dtype"] = str(dtype)
+            data_dset.attrs["title"] = "Raw data"
+        else:
+            data_dset = sender_grp["data"]
+
+        if "meta_data" not in sender_grp:
+            meta_grp = sender_grp.create_group("meta_data")
+            meta_grp.attrs["title"] = "DataRecord metadata"
+
+            self._create_appendable_dataset(
+                meta_grp, "sequence_number", np.uint64
+            )
+            self._create_appendable_dataset(
+                meta_grp, "index_start", np.uint64
+            )
+            self._create_appendable_dataset(
+                meta_grp, "index_stop", np.uint64
+            )
+            self._create_appendable_dataset(
+                meta_grp, "data_length", np.uint64
+            )
+            self._create_appendable_dataset(
+                meta_grp, "n_blocks", np.uint32
+            )
+            self._create_appendable_dataset(
+                meta_grp,
+                "tags",
+                h5py.string_dtype(encoding="utf-8"),
+            )
+        else:
+            meta_grp = sender_grp["meta_data"]
+
+        return data_dset, meta_grp
+
+    @staticmethod
+    def _create_appendable_dataset(
+        group: h5py.Group,
+        name: str,
+        dtype: Any,
+    ) -> h5py.Dataset:
+        return group.create_dataset(
+            name,
+            shape=(0,),
+            maxshape=(None,),
+            dtype=dtype,
+            chunks=True,
+            compression="gzip",
+            compression_opts=1,
+        )
+
+    def _append_metadata(
+        self,
+        meta_grp: h5py.Group,
+        sequence_number: int,
+        index_start: int,
+        index_stop: int,
+        data_length: int,
+        n_blocks: int,
+        tags: dict[str, Any],
+    ) -> None:
+        values = {
+            "sequence_number": sequence_number,
+            "index_start": index_start,
+            "index_stop": index_stop,
+            "data_length": data_length,
+            "n_blocks": n_blocks,
+            "tags": json.dumps(self._json_convert(tags), sort_keys=True),
+        }
+
+        row_index = meta_grp["sequence_number"].shape[0]
+        for name, value in values.items():
+            dset = meta_grp[name]
+            dset.resize((row_index + 1,))
+            dset[row_index] = value
+
+    def _flush_if_due(self) -> None:
+        if self.flush_interval <= 0:
+            return
+
+        now = datetime.datetime.now(datetime.UTC)
+        elapsed = (now - self.last_flush).total_seconds()
+        if elapsed > self.flush_interval:
+            self.outfile.flush()
+            self.last_flush = now
 
     def _open_file(self, filename: str) -> h5py.File:
         self.log.info("Creating file %s", filename)
@@ -115,7 +266,9 @@ class TJMonopix2H5Receiver(ReceiverSatellite):
         try:
             os.makedirs(directory, exist_ok=True)
         except Exception as exc:
-            raise RuntimeError(f"Unable to create directory {directory}: {exc}") from exc
+            raise RuntimeError(
+                f"Unable to create directory {directory}: {exc}"
+            ) from exc
 
         filepath = directory / filename
         if filepath.exists():
@@ -135,32 +288,58 @@ class TJMonopix2H5Receiver(ReceiverSatellite):
             "date_utc": datetime.datetime.now(datetime.UTC).isoformat(),
             "receiver_class": self.__class__.__name__,
         }
-        grp = outfile.create_group(self.name)
-        grp.attrs.update(self._attrs_convert(metadata))
+        outfile.require_group("receiver_metadata").attrs.update(
+            self._attrs_convert(metadata)
+        )
 
-    def _attrs_convert(self, meta: dict[str, Any], _prefix: str = "") -> dict[str, Any]:
-        def _convert(value: Any) -> Any:
-            if isinstance(value, datetime.datetime):
-                return str(value)
-            if isinstance(value, np.generic):
-                return value.item()
-            if isinstance(value, (list, tuple)):
-                try:
-                    return np.array(value)
-                except (ValueError, TypeError):
-                    return str(value)
-            if value is None:
-                return "None"
-            return value
-
+    def _attrs_convert(
+        self,
+        meta: dict[str, Any],
+        _prefix: str = "",
+    ) -> dict[str, Any]:
         result = {}
+
         for key, value in meta.items():
             full_key = f"{_prefix}.{key}" if _prefix else key
             if isinstance(value, dict):
                 result.update(self._attrs_convert(value, _prefix=full_key))
             else:
-                result[full_key] = _convert(value)
+                converted = self._convert_attr_value(value)
+                if converted is not None:
+                    result[full_key] = converted
+
         return result
+
+    @staticmethod
+    def _convert_attr_value(value: Any) -> Any:
+        if isinstance(value, datetime.datetime):
+            return value.isoformat()
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, (list, tuple)):
+            try:
+                return np.asarray(value)
+            except (ValueError, TypeError):
+                return str(value)
+        if value is None:
+            return "None"
+        return value
+
+    @classmethod
+    def _json_convert(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return {str(k): cls._json_convert(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [cls._json_convert(v) for v in value]
+        if isinstance(value, np.ndarray):
+            return value.tolist()
+        if isinstance(value, np.generic):
+            return value.item()
+        if isinstance(value, datetime.datetime):
+            return value.isoformat()
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return str(value)
 
     @schedule_metric("int", 5)
     def total_records_received(self) -> int | None:
