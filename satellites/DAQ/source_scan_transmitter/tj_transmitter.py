@@ -14,6 +14,7 @@ import yaml
 
 from tjmonopix2.scans.scan_source import SourceScan
 from tjmonopix2.system.fifo_readout import FifoReadout, NoDataTimeout
+from tjmonopix2 import utils
 
 
 class CustomFifoReadout(FifoReadout):
@@ -135,6 +136,28 @@ class CustomSourceScan(SourceScan):
         )
         self._first_read = False
 
+def _make_serializable(obj):
+    """Recursively convert an object into a JSON-serializable structure."""
+    if isinstance(obj, dict):
+        return {k: _make_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_make_serializable(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        # Store dtype, shape, and data as a list
+        return {
+            "__numpy__": True,
+            "dtype": str(obj.dtype),
+            "shape": list(obj.shape),
+            "data": obj.tolist(),
+        }
+    if isinstance(obj, np.generic):
+        # Scalar numpy types
+        return obj.item()
+    # Basic JSON-safe types
+    if isinstance(obj, (str, int, float, bool, type(None))):
+        return obj
+    # Fallback: coerce to string
+    return str(obj)
 
 class TJMonopix2(TransmitterSatellite):
     def __init__(self, *args, **kwargs):
@@ -205,6 +228,14 @@ class TJMonopix2(TransmitterSatellite):
             self.log.exception("do_launching failed")
             raise
 
+    def do_starting(self, run_identifier: str) -> str:
+        self.bor = self._build_meta_payload("in")
+        self.log.info(self.bor)
+        return "Started"
+
+    def do_stopping(self) -> str:
+        self.eor = self._build_meta_payload("out")
+        return "Stopping"
 
     def send_test_packets(self, payload=None) -> str:
         self.log.info("synthetic Constellation send test start")
@@ -307,6 +338,99 @@ class TJMonopix2(TransmitterSatellite):
             self.bench_conf["modules"]["module_0"]["chip_0"]["chip_sn"] = config.get("chip_sn")
             self.bench_conf["modules"]["module_0"]["chip_0"]["send_data"] = config.get("send_data")
             self.bench_conf["analysis"]["create_pdf"] = config.get("create_pdf")
+
+    def _build_meta_payload(self, stage: str) -> dict:
+        """Build BOR payload containing configuration_in for each chip."""
+        assert stage in ["in", "out"]
+        chips_config = {}
+
+        for name, container in self.src_scan.chips.items():
+            # Activate this chip's handles on the scan so we can read
+            # self.src_scan.chip, self.src_scan.chip_settings, etc.
+            self.src_scan._set_chip_handles(container)
+
+            chips_config[name] = self._extract_chip_configuration(
+                container=container,
+                stage=stage,
+            )
+        self.src_scan._unset_chip_handles()
+
+        raw_payload = {
+            "chips": chips_config,
+            "run_identifier": getattr(self.src_scan, "run_name", None),
+        }
+        return _make_serializable(raw_payload)
+
+    def _extract_chip_configuration(
+        self,
+        container,
+        stage: str,
+    ) -> dict:
+        """Extract a ScanBase-compatible configuration dict for one chip."""
+        scan = self.src_scan
+
+        # Basic run metadata
+        scan_id = getattr(scan, "scan_id", "")
+        run_name = getattr(scan, "run_name", "")
+        software_version = self._get_software_version()
+
+        # Chip-level settings already present on the container / scan
+        chip_settings = dict(container.chip_settings)
+        module_settings = dict(container.module_settings)
+        scan_config = dict(container.scan_config)
+
+        # Registers and masks come from the live chip object
+        chip = scan.chip
+        registers = {
+            name: str(reg.get())
+            for name, reg in chip.registers.items()
+        }
+
+        masks = {
+            name: mask.copy()
+            for name, mask in chip.masks.items()
+        }
+
+        use_pixel = getattr(chip.masks, "disable_mask", None)
+        if use_pixel is not None:
+            use_pixel = use_pixel.copy()
+
+        # Bench configuration is stored on the scan
+        bench_configuration = dict(scan.configuration.get("bench", {}))
+
+        # Assemble into the same logical structure that ScanBase writes:
+        return {
+            "scan": {
+                "run_config": {
+                    "scan_id": scan_id,
+                    "run_name": run_name,
+                    "software_version": software_version,
+                    "module": module_settings.get("name", ""),
+                    "chip_sn": chip_settings.get("chip_sn", container.name),
+                    "receiver": chip_settings.get("receiver", ""),
+                },
+                "scan_config": {
+                    k: v
+                    for k, v in scan_config.items()
+                    if k not in ("chip",)
+                },
+            },
+            "chip": {
+                "registers": registers,
+                "settings": chip_settings,
+                "module": module_settings,
+                "masks": masks,
+                "use_pixel": use_pixel,
+            },
+            "bench": bench_configuration,
+        }
+
+    @staticmethod
+    def _get_software_version() -> str:
+        try:
+            return utils.get_software_version()
+        except Exception:
+            return ""
 
     @schedule_metric("", 1)
     def trigger_number(self) -> Any:

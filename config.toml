@@ -68,10 +68,20 @@ stop_row = 512
 max_triggers = 10   # Number of maximum received triggers after stopping readout, if False no limit on received trigger
 send_data= "tcp://127.0.0.1:5500" # Socket address of online monitor
 
+[FakePacketSender.chip2]
+chip_sn = 'W05R25'
+start_column = 300
+stop_column = 305
+start_row = 0
+stop_row = 512
+max_triggers = 10   # Number of maximum received triggers after stopping readout, if False no limit on received trigger
+send_data= "tcp://127.0.0.1:5500" # Socket address of online monitor
+
+
+
 [TJMonoPix2.chip0._data]
 bor_timeout = 30
 data_timeout = 30
-eor_timeout = 30
 
 [Keithley.2410]
 device = "2410"
@@ -85,3 +95,7 @@ compliance = 0.1
 
 [TJMonopix2H5Receiver.receiver]
 output_directory = "/home/pixlab/jiddon"
+
+[TJMonopix2H5Receiver.receiver._data]
+eor_timeout = 30
+
