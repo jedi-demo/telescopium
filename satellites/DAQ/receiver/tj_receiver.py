@@ -1,28 +1,26 @@
-"""
-TJ-Monopix2 Constellation receiver satellite.
+"""TJ-Monopix2 Constellation receiver writing ScanBase-compatible HDF5 files.
 
-    /
-      receiver_metadata/
-      <sender>/
-        BOR/
-          user_tags/                 attributes
-          configuration/             flattened attributes
-        data                         one appendable raw-data dataset
-        meta_data/                   appendable record metadata datasets
-        EOR/
-          user_tags/                 attributes
-          run_metadata/              flattened attributes
+Each sender is treated as one chip. Consequently, an output file has this
+layout::
 
+    /<sender>/
+        configuration_in/
+        raw_data
+        meta_data
+        configuration_out/
+
+The contents of every ``/<sender>`` group use the same node names, PyTables
+filters, raw-data EArray, and metadata table schema as ``ScanBase``.
 """
 
 import datetime
-import json
 import os
 import pathlib
+from collections.abc import Mapping
 from typing import Any
 
-import h5py
 import numpy as np
+import tables as tb
 
 from constellation.core import __version__
 from constellation.core.configuration import Configuration
@@ -31,38 +29,64 @@ from constellation.core.monitoring import schedule_metric
 from constellation.core.receiver_satellite import ReceiverSatellite
 
 
+# Copied from tjmonopix2.scan_base.
+FILTER_RAW_DATA = tb.Filters(complib="blosc", complevel=5, fletcher32=False)
+FILTER_TABLES = tb.Filters(complib="zlib", complevel=5, fletcher32=False)
+
+
+# Copied from tjmonopix2.scan_base.
+# downstream scan analysis expects this exact metadata-table layout.
+class MetaTable(tb.IsDescription):
+    index_start = tb.Int64Col(pos=0)
+    index_stop = tb.Int64Col(pos=1)
+    data_length = tb.UInt32Col(pos=2)
+    timestamp_start = tb.Float64Col(pos=3)
+    timestamp_stop = tb.Float64Col(pos=4)
+    scan_param_id = tb.UInt32Col(pos=5)
+    error = tb.UInt32Col(pos=6)
+    trigger = tb.Float64Col(pos=7)
+
+
+# Copied from tjmonopix2.scan_base.
+class RunConfigTable(tb.IsDescription):
+    attribute = tb.StringCol(64)
+    value = tb.StringCol(512)
+
+
+# Copied from tjmonopix2.scan_base.
+class RegisterTable(tb.IsDescription):
+    register = tb.StringCol(64)
+    value = tb.StringCol(256)
+
+
 class TJMonopix2H5Receiver(ReceiverSatellite):
-    """Receiver satellite writing scan_base-style HDF5 files."""
+    """Write one ScanBase-format hierarchy per data sender/chip."""
 
     def do_initializing(self, config: Configuration) -> str:
         self.output_directory = config.get_path("output_directory")
         self.flush_interval = config.get_num("flush_interval", 10.0)
-        self.last_flush = None
-        self.outfile = None
-        self.record_counts = {}
-        self._seen_eor = set()
+        self.last_flush: datetime.datetime | None = None
+        self.outfile: tb.File | None = None
+        self.run_identifier: str | None = None
+        self.record_counts: dict[str, int] = {}
+        self._seen_eor: set[str] = set()
         return f"Initialized receiver, output directory: {self.output_directory}"
 
     def do_starting(self, run_identifier: str) -> str:
         self._seen_eor = set()
-        self.last_flush = datetime.datetime.now(datetime.UTC)
         self.record_counts = {}
+        self.run_identifier = run_identifier
+        self.last_flush = datetime.datetime.now(datetime.UTC)
         self.outfile = self._open_file(f"tjmonopix2_{run_identifier}.h5")
         return f"Started run {run_identifier}"
 
     def do_stopping(self) -> str:
-        if self.outfile is not None:
-            self.outfile.flush()
-            self.outfile.close()
-            self.outfile = None
+        self._close_file()
         return "Run stopped"
 
     def fail_gracefully(self) -> str:
         try:
-            if self.outfile is not None:
-                self.outfile.flush()
-                self.outfile.close()
-                self.outfile = None
+            self._close_file()
         except Exception:
             pass
         return "Receiver failed gracefully"
@@ -73,61 +97,53 @@ class TJMonopix2H5Receiver(ReceiverSatellite):
         user_tags: dict[str, Any],
         configuration: dict[str, Any],
     ) -> None:
-        """Store the beginning-of-run metadata for a sender."""
-        sender_grp = self.outfile.require_group(sender)
-        bor_grp = sender_grp.require_group("BOR")
+        """Store BOR metadata and ScanBase-style configuration_in."""
+        sender_group = self._chip_group(sender)
 
-        bor_grp.require_group("user_tags").attrs.update(
-            self._attrs_convert(user_tags)
-        )
-        bor_grp.require_group("configuration").attrs.update(
-            self._attrs_convert(configuration)
+        bor_group = self._get_or_create_group(
+            sender_group,
+            "BOR",
+            "Beginning of run",
         )
 
-        self._require_data_nodes(sender_grp)
+        bor_user_tags = self._get_or_create_group(
+            bor_group,
+            "user_tags",
+            "BOR user tags",
+        )
+        self._write_attributes(bor_user_tags, user_tags)
 
-        self.record_counts.setdefault(sender, 0)
+        bor_configuration = self._get_or_create_group(
+            bor_group,
+            "configuration",
+            "BOR configuration",
+        )
+        self._write_attributes(bor_configuration, configuration)
 
-    def receive_data(self, sender: str, data_record: DataRecord) -> None:
-        """Append all blocks in a DataRecord to one sender data dataset."""
-        sender_grp = self.outfile.require_group(sender)
-        data_dset, meta_grp = self._require_data_nodes(sender_grp)
+        chips = user_tags.get("chips", {})
+        chip_config = chips.get(sender)
 
-        dtype = np.dtype(data_record.tags.get("dtype", np.uint32))
-        if data_dset.dtype != dtype:
-            raise TypeError(
-                f"Inconsistent dtype for sender {sender!r}: "
-                f"existing={data_dset.dtype}, new={dtype}"
+        if chip_config is None and len(chips) == 1:
+            chip_config = next(iter(chips.values()))
+
+        if chip_config is None:
+            self.log.warning(
+                "BOR from %s contains no matching chip configuration; "
+                "available chips: %s",
+                sender,
+                list(chips),
             )
-
-        arrays = [
-            np.frombuffer(block, dtype=dtype)
-            for block in data_record.blocks
-        ]
-
-        if arrays:
-            new_data = np.concatenate(arrays)
-            index_start = int(data_dset.shape[0])
-            index_stop = index_start + int(new_data.shape[0])
-
-            data_dset.resize((index_stop,))
-            data_dset[index_start:index_stop] = new_data
         else:
-            index_start = int(data_dset.shape[0])
-            index_stop = index_start
+            configuration_in = self._get_or_create_group(
+                sender_group,
+                "configuration_in",
+                "Configuration before scan",
+            )
+            self._write_configuration_tree(configuration_in, chip_config)
 
-        self._append_metadata(
-            meta_grp,
-            sequence_number=data_record.sequence_number,
-            index_start=index_start,
-            index_stop=index_stop,
-            data_length=index_stop - index_start,
-            n_blocks=len(data_record.blocks),
-            tags=data_record.tags,
-        )
-
-        self.record_counts[sender] = self.record_counts.get(sender, 0) + 1
-        self._flush_if_due()
+        self._require_data_nodes(sender_group)
+        self.record_counts.setdefault(sender, 0)
+        self.outfile.flush()
 
     def receive_eor(
         self,
@@ -135,221 +151,445 @@ class TJMonopix2H5Receiver(ReceiverSatellite):
         user_tags: dict[str, Any],
         run_metadata: dict[str, Any],
     ) -> None:
-        """Store the end-of-run metadata for a sender."""
+        """Store EOR metadata and ScanBase-style configuration_out."""
         if sender in self._seen_eor:
             self.log.warning(
-                "Duplicate EOR received from %s, ignoring second EOR", sender
+                "Duplicate EOR received from %s; ignoring it",
+                sender,
             )
             return
 
-        sender_grp = self.outfile.require_group(sender)
-        eor_grp = sender_grp.require_group("EOR")
+        sender_group = self._chip_group(sender)
 
-        eor_grp.require_group("user_tags").attrs.update(
-            self._attrs_convert(user_tags)
+        eor_group = self._get_or_create_group(
+            sender_group,
+            "EOR",
+            "End of run",
         )
-        eor_grp.require_group("run_metadata").attrs.update(
-            self._attrs_convert(run_metadata)
+
+        eor_user_tags = self._get_or_create_group(
+            eor_group,
+            "user_tags",
+            "EOR user tags",
         )
+        self._write_attributes(eor_user_tags, user_tags)
+
+        eor_run_metadata = self._get_or_create_group(
+            eor_group,
+            "run_metadata",
+            "EOR run metadata",
+        )
+        self._write_attributes(eor_run_metadata, run_metadata)
+
+        chips = user_tags.get("chips", {})
+        chip_config = chips.get(sender)
+
+        if chip_config is None and len(chips) == 1:
+            chip_config = next(iter(chips.values()))
+
+        if chip_config is None:
+            self.log.warning(
+                "EOR from %s contains no matching chip configuration; "
+                "available chips: %s",
+                sender,
+                list(chips),
+            )
+        else:
+            configuration_out = self._get_or_create_group(
+                sender_group,
+                "configuration_out",
+                "Configuration after scan step",
+            )
+            self._write_configuration_tree(configuration_out, chip_config)
 
         self._seen_eor.add(sender)
         self.outfile.flush()
 
+    def receive_data(self, sender: str, data_record: DataRecord) -> None:
+        """Append a DataRecord using ScanBase.handle_data semantics."""
+        chip_group = self._chip_group(sender)
+        raw_data, meta_data = self._require_data_nodes(chip_group)
+
+        data = self._data_record_to_array(sender, data_record)
+        total_words = raw_data.nrows
+        raw_data.append(data)
+
+        tags = data_record.tags
+        row = meta_data.row
+        row["timestamp_start"] = self._tag_number(tags, "timestamp_start", 0.0)
+        row["timestamp_stop"] = self._tag_number(tags, "timestamp_stop", 0.0)
+        row["error"] = self._tag_number(tags, "error", 0)
+        row["data_length"] = data.shape[0]
+        row["index_start"] = total_words
+        row["index_stop"] = total_words + data.shape[0]
+        row["scan_param_id"] = self._tag_number(tags, "scan_param_id", 0)
+        row["trigger"] = self._tag_number(tags, "trigger", 0.0)
+        row.append()
+
+        raw_data.flush()
+        meta_data.flush()
+
+        self.record_counts[sender] = self.record_counts.get(sender, 0) + 1
+        self._flush_if_due()
+
     def _require_data_nodes(
         self,
-        sender_grp: h5py.Group,
-        dtype: np.dtype | None = None,
-    ) -> tuple[h5py.Dataset, h5py.Group]:
-        """Create or retrieve the appendable data and metadata nodes."""
-        if "data" not in sender_grp:
-            if dtype is None:
-                dtype = np.dtype(np.uint32)
-
-            data_dset = sender_grp.create_dataset(
-                "data",
+        chip_group: tb.Group,
+    ) -> tuple[tb.EArray, tb.Table]:
+        """Create/retrieve the exact raw-data and metadata nodes from ScanBase."""
+        try:
+            raw_data = chip_group.raw_data
+        except tb.NoSuchNodeError:
+            raw_data = self.outfile.create_earray(
+                chip_group,
+                name="raw_data",
+                atom=tb.UIntAtom(),
                 shape=(0,),
-                maxshape=(None,),
-                dtype=dtype,
-                chunks=True,
-                compression="gzip",
-                compression_opts=1,
+                title="raw_data",
+                filters=FILTER_RAW_DATA,
             )
-            data_dset.attrs["dtype"] = str(dtype)
-            data_dset.attrs["title"] = "Raw data"
-        else:
-            data_dset = sender_grp["data"]
 
-        if "meta_data" not in sender_grp:
-            meta_grp = sender_grp.create_group("meta_data")
-            meta_grp.attrs["title"] = "DataRecord metadata"
+        try:
+            meta_data = chip_group.meta_data
+        except tb.NoSuchNodeError:
+            meta_data = self.outfile.create_table(
+                chip_group,
+                name="meta_data",
+                description=MetaTable,
+                title="meta_data",
+                filters=FILTER_TABLES,
+            )
 
-            self._create_appendable_dataset(
-                meta_grp, "sequence_number", np.uint64
-            )
-            self._create_appendable_dataset(
-                meta_grp, "index_start", np.uint64
-            )
-            self._create_appendable_dataset(
-                meta_grp, "index_stop", np.uint64
-            )
-            self._create_appendable_dataset(
-                meta_grp, "data_length", np.uint64
-            )
-            self._create_appendable_dataset(
-                meta_grp, "n_blocks", np.uint32
-            )
-            self._create_appendable_dataset(
-                meta_grp,
-                "tags",
-                h5py.string_dtype(encoding="utf-8"),
-            )
-        else:
-            meta_grp = sender_grp["meta_data"]
+        return raw_data, meta_data
 
-        return data_dset, meta_grp
+    def _write_configuration_tree(
+        self,
+        parent: tb.Group,
+        config: Mapping[str, Any],
+    ) -> None:
+        """Write a ScanBase-style configuration subtree using PyTables."""
+        if "scan" in config:
+            self._write_scan_config(parent, config["scan"])
 
-    @staticmethod
-    def _create_appendable_dataset(
-        group: h5py.Group,
-        name: str,
-        dtype: Any,
-    ) -> h5py.Dataset:
-        return group.create_dataset(
-            name,
-            shape=(0,),
-            maxshape=(None,),
-            dtype=dtype,
-            chunks=True,
-            compression="gzip",
-            compression_opts=1,
+        if "chip" in config:
+            self._write_chip_config(parent, config["chip"])
+
+        if "bench" in config:
+            self._write_bench_config(parent, config["bench"])
+
+    def _write_scan_config(
+        self,
+        parent: tb.Group,
+        scan: Mapping[str, Any],
+    ) -> None:
+        scan_group = self._get_or_create_group(
+            parent,
+            "scan",
+            "Scan configuration",
         )
 
-    def _append_metadata(
+        run_config_table = self.outfile.create_table(
+            scan_group,
+            name="run_config",
+            title="Run config",
+            description=RunConfigTable,
+            filters=FILTER_TABLES,
+        )
+        self._write_dict_to_table(
+            scan.get("run_config", {}),
+            run_config_table,
+        )
+
+        scan_config_table = self.outfile.create_table(
+            scan_group,
+            name="scan_config",
+            title="Scan configuration",
+            description=RunConfigTable,
+            filters=FILTER_TABLES,
+        )
+        self._write_dict_to_table(
+            scan.get("scan_config", {}),
+            scan_config_table,
+        )
+
+    def _write_chip_config(
         self,
-        meta_grp: h5py.Group,
-        sequence_number: int,
-        index_start: int,
-        index_stop: int,
-        data_length: int,
-        n_blocks: int,
-        tags: dict[str, Any],
+        parent: tb.Group,
+        chip: Mapping[str, Any],
     ) -> None:
-        values = {
-            "sequence_number": sequence_number,
-            "index_start": index_start,
-            "index_stop": index_stop,
-            "data_length": data_length,
-            "n_blocks": n_blocks,
-            "tags": json.dumps(self._json_convert(tags), sort_keys=True),
-        }
+        chip_group = self._get_or_create_group(
+            parent,
+            "chip",
+            "Chip configuration",
+        )
 
-        row_index = meta_grp["sequence_number"].shape[0]
-        for name, value in values.items():
-            dset = meta_grp[name]
-            dset.resize((row_index + 1,))
-            dset[row_index] = value
+        registers_table = self.outfile.create_table(
+            chip_group,
+            name="registers",
+            title="Registers",
+            description=RegisterTable,
+            filters=FILTER_TABLES,
+        )
+        self._write_registers(
+            chip.get("registers", {}),
+            registers_table,
+        )
 
-    def _flush_if_due(self) -> None:
-        if self.flush_interval <= 0:
-            return
+        settings_table = self.outfile.create_table(
+            chip_group,
+            name="settings",
+            title="Chip settings from test bench",
+            description=RunConfigTable,
+            filters=FILTER_TABLES,
+        )
+        self._write_dict_to_table(
+            chip.get("settings", {}),
+            settings_table,
+        )
 
-        now = datetime.datetime.now(datetime.UTC)
-        elapsed = (now - self.last_flush).total_seconds()
-        if elapsed > self.flush_interval:
-            self.outfile.flush()
-            self.last_flush = now
+        module_table = self.outfile.create_table(
+            chip_group,
+            name="module",
+            title="Module settings from test bench",
+            description=RunConfigTable,
+            filters=FILTER_TABLES,
+        )
+        self._write_dict_to_table(
+            chip.get("module", {}),
+            module_table,
+        )
 
-    def _open_file(self, filename: str) -> h5py.File:
-        self.log.info("Creating file %s", filename)
+        masks = chip.get("masks", {})
+        if masks:
+            masks_group = self._get_or_create_group(
+                chip_group,
+                "masks",
+                "Pixel masks",
+            )
 
+            for name, encoded_mask in masks.items():
+                mask = self._decode_array(encoded_mask)
+                self.outfile.create_carray(
+                    masks_group,
+                    name=str(name),
+                    title=str(name).capitalize(),
+                    obj=mask,
+                    filters=FILTER_RAW_DATA,
+                )
+
+        if chip.get("use_pixel") is not None:
+            use_pixel = self._decode_array(chip["use_pixel"])
+            self.outfile.create_carray(
+                chip_group,
+                name="use_pixel",
+                title="Select pixels to be used in scans",
+                obj=use_pixel,
+                filters=FILTER_RAW_DATA,
+            )
+
+    def _write_bench_config(
+        self,
+        parent: tb.Group,
+        bench: Mapping[str, Any],
+    ) -> None:
+        bench_group = self._get_or_create_group(
+            parent,
+            "bench",
+            "Test bench settings",
+        )
+
+        for section, contents in bench.items():
+            sec_group = self._get_or_create_group(
+                bench_group,
+                str(section),
+                str(section).capitalize(),
+            )
+            self._write_attributes(sec_group, contents or {})
+
+    def _get_or_create_group(
+        self,
+        parent: tb.Group,
+        name: str,
+        title: str = "",
+    ) -> tb.Group:
+        """Return an existing PyTables group or create it."""
+        try:
+            child = parent._f_get_child(name)
+        except tb.NoSuchNodeError:
+            return self.outfile.create_group(parent, name, title)
+
+        if not isinstance(child, tb.Group):
+            raise TypeError(
+                f"Expected group {parent._v_pathname}/{name}, "
+                f"found {type(child).__name__}"
+            )
+
+        return child
+
+    def _write_attributes(
+        self,
+        group: tb.Group,
+        values: Mapping[str, Any],
+        prefix: str = "",
+    ) -> None:
+        """Write small diagnostic values as PyTables attributes.
+
+        Large serialized NumPy arrays are not written as attributes. They are
+        written separately as CArrays in the ScanBase-compatible configuration
+        tree.
+        """
+        for key, value in values.items():
+            key = str(key)
+            full_key = f"{prefix}.{key}" if prefix else key
+
+            if isinstance(value, Mapping):
+                if value.get("__numpy__") is True:
+                    if key == "data":
+                        continue
+
+                    group._v_attrs[f"{full_key}.dtype"] = str(
+                        value.get("dtype", "")
+                    )
+                    group._v_attrs[f"{full_key}.shape"] = np.asarray(
+                        value.get("shape", []),
+                        dtype=np.int64,
+                    )
+                    continue
+
+                self._write_attributes(
+                    group,
+                    value,
+                    prefix=full_key,
+                )
+                continue
+
+            group._v_attrs[full_key] = self._attribute_value(value)
+
+    @staticmethod
+    def _attribute_value(value: Any) -> Any:
+        if isinstance(value, np.generic):
+            return value.item()
+
+        if isinstance(value, datetime.datetime):
+            return value.isoformat()
+
+        if isinstance(value, (list, tuple)):
+            try:
+                return np.asarray(value)
+            except (TypeError, ValueError):
+                return str(value)
+
+        if value is None:
+            return "None"
+
+        return value
+
+    @staticmethod
+    def _decode_array(value: Any) -> np.ndarray:
+        if (
+            isinstance(value, Mapping)
+            and value.get("__numpy__") is True
+        ):
+            array = np.asarray(
+                value["data"],
+                dtype=np.dtype(value["dtype"]),
+            )
+            return array.reshape(tuple(value["shape"]))
+
+        return np.asarray(value)
+
+    @staticmethod
+    def _write_dict_to_table(values: Any, table: tb.Table) -> None:
+        for attribute, value in TJMonopix2H5Receiver._mapping(values).items():
+            row = table.row
+            row["attribute"] = str(attribute)
+            row["value"] = TJMonopix2H5Receiver._table_value(value)
+            row.append()
+        table.flush()
+
+    @staticmethod
+    def _write_registers(values: Any, table: tb.Table) -> None:
+        for register, value in TJMonopix2H5Receiver._mapping(values).items():
+            row = table.row
+            row["register"] = str(register)
+            row["value"] = TJMonopix2H5Receiver._table_value(value)
+            row.append()
+        table.flush()
+
+    @staticmethod
+    def _data_record_to_array(sender: str, data_record: DataRecord) -> np.ndarray:
+        dtype = np.dtype(data_record.tags.get("dtype", np.uint32))
+        if dtype != np.dtype(np.uint32):
+            raise TypeError(
+                f"Sender {sender!r} supplied {dtype}; ScanBase raw_data is uint32"
+            )
+
+        blocks = [np.frombuffer(block, dtype=np.uint32) for block in data_record.blocks]
+        return np.concatenate(blocks) if blocks else np.empty(0, dtype=np.uint32)
+
+    def _chip_group(self, sender: str) -> tb.Group:
+        if self.outfile is None:
+            raise RuntimeError("Cannot receive data without an open output file")
+
+        return self._get_or_create_group(
+            self.outfile.root,
+            sender,
+            f"Chip {sender}",
+        )
+
+    def _open_file(self, filename: str) -> tb.File:
         directory = pathlib.Path(self.output_directory)
         try:
             os.makedirs(directory, exist_ok=True)
-        except Exception as exc:
-            raise RuntimeError(
-                f"Unable to create directory {directory}: {exc}"
-            ) from exc
+        except OSError as exc:
+            raise RuntimeError(f"Unable to create directory {directory}: {exc}") from exc
 
         filepath = directory / filename
         if filepath.exists():
             raise RuntimeError(f"File already exists: {filepath}")
 
+        self.log.info("Creating file %s", filepath)
         try:
-            h5file = h5py.File(filepath, "w")
-        except Exception as exc:
+            return tb.open_file(filepath, mode="w", title="TJ-Monopix2 Constellation run")
+        except OSError as exc:
             raise RuntimeError(f"Unable to open {filepath}: {exc}") from exc
 
-        self._add_metadata(h5file)
-        return h5file
+    def _close_file(self) -> None:
+        if self.outfile is not None:
+            self.outfile.flush()
+            self.outfile.close()
+            self.outfile = None
 
-    def _add_metadata(self, outfile: h5py.File) -> None:
-        metadata = {
-            "constellation_version": __version__,
-            "date_utc": datetime.datetime.now(datetime.UTC).isoformat(),
-            "receiver_class": self.__class__.__name__,
-        }
-        outfile.require_group("receiver_metadata").attrs.update(
-            self._attrs_convert(metadata)
-        )
+    def _flush_if_due(self) -> None:
+        if self.flush_interval <= 0 or self.last_flush is None:
+            return
 
-    def _attrs_convert(
-        self,
-        meta: dict[str, Any],
-        _prefix: str = "",
-    ) -> dict[str, Any]:
-        result = {}
-
-        for key, value in meta.items():
-            full_key = f"{_prefix}.{key}" if _prefix else key
-            if isinstance(value, dict):
-                result.update(self._attrs_convert(value, _prefix=full_key))
-            else:
-                converted = self._convert_attr_value(value)
-                if converted is not None:
-                    result[full_key] = converted
-
-        return result
-
-    @staticmethod
-    def _convert_attr_value(value: Any) -> Any:
-        if isinstance(value, datetime.datetime):
-            return value.isoformat()
-        if isinstance(value, np.generic):
-            return value.item()
-        if isinstance(value, (list, tuple)):
-            try:
-                return np.asarray(value)
-            except (ValueError, TypeError):
-                return str(value)
-        if value is None:
-            return "None"
-        return value
-
-    @classmethod
-    def _json_convert(cls, value: Any) -> Any:
-        if isinstance(value, dict):
-            return {str(k): cls._json_convert(v) for k, v in value.items()}
-        if isinstance(value, (list, tuple)):
-            return [cls._json_convert(v) for v in value]
-        if isinstance(value, np.ndarray):
-            return value.tolist()
-        if isinstance(value, np.generic):
-            return value.item()
-        if isinstance(value, datetime.datetime):
-            return value.isoformat()
-        if value is None or isinstance(value, (str, int, float, bool)):
-            return value
-        return str(value)
+        now = datetime.datetime.now(datetime.UTC)
+        if (now - self.last_flush).total_seconds() >= self.flush_interval:
+            self.outfile.flush()
+            self.last_flush = now
 
     @schedule_metric("int", 5)
-    def total_records_received(self) -> int | None:
-        if not self.record_counts:
-            return 0
-        return int(sum(self.record_counts.values()))
+    def total_records_received(self) -> int:
+        return sum(self.record_counts.values())
 
     @schedule_metric("filename", 5)
     def currently_open_filename(self) -> str | None:
-        try:
-            return self.outfile.filename
-        except Exception:
-            return None
+        return self.outfile.filename if self.outfile is not None else None
+
+    @staticmethod
+    def _tag_number(tags: Mapping[str, Any], name: str, default: int | float) -> int | float:
+        value = tags.get(name, default)
+        return value.item() if isinstance(value, np.generic) else value
+
+    @staticmethod
+    def _mapping(value: Any) -> Mapping[str, Any]:
+        return value if isinstance(value, Mapping) else {}
+
+    @staticmethod
+    def _table_value(value: Any) -> str:
+        if isinstance(value, datetime.datetime):
+            return value.isoformat()
+        if isinstance(value, np.generic):
+            value = value.item()
+        return str(value)
