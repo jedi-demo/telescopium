@@ -12,9 +12,10 @@ from typing import Any
 import numpy as np
 import yaml
 
+from tjmonopix2 import utils
+from tjmonopix2.scan_config import ScanConfig, scan_config_to_payload
 from tjmonopix2.scans.scan_source import SourceScan
 from tjmonopix2.system.fifo_readout import FifoReadout, NoDataTimeout
-from tjmonopix2 import utils
 
 
 class CustomFifoReadout(FifoReadout):
@@ -31,6 +32,7 @@ class CustomFifoReadout(FifoReadout):
                 status=status,
                 n_words=n_words,
             )
+
         return {
             "dtype": "uint32",
             "timestamp_begin": timestamp_begin,
@@ -39,7 +41,14 @@ class CustomFifoReadout(FifoReadout):
             "n_words": n_words,
         }
 
-    def start(self, errback=None, reset_rx=False, reset_sram_fifo=False, no_data_timeout=None, fill_buffer=False):
+    def start(
+        self,
+        errback=None,
+        reset_rx=False,
+        reset_sram_fifo=False,
+        no_data_timeout=None,
+        fill_buffer=False,
+    ):
         if self._is_running:
             raise RuntimeError("FIFO readout is already running.")
 
@@ -53,12 +62,15 @@ class CustomFifoReadout(FifoReadout):
 
         self._record_count = 0
         self._words_per_read.clear()
-
         self.stop_readout.clear()
         self.force_stop.clear()
 
         if self.errback:
-            self.watchdog_thread = threading.Thread(target=self.watchdog, name="WatchdogThread", daemon=True)
+            self.watchdog_thread = threading.Thread(
+                target=self.watchdog,
+                name="WatchdogThread",
+                daemon=True,
+            )
             self.watchdog_thread.start()
 
         self.readout_thread = threading.Thread(
@@ -68,7 +80,6 @@ class CustomFifoReadout(FifoReadout):
             daemon=True,
         )
         self.readout_thread.start()
-
         self._is_running = True
 
     def readout(self, no_data_timeout=None):
@@ -76,17 +87,20 @@ class CustomFifoReadout(FifoReadout):
         curr_time = self.get_float_time()
         time_wait = 0.0
 
-        while not self.force_stop.wait(time_wait if time_wait >= 0.0 else 0.0):
+        while not self.force_stop.wait(max(time_wait, 0.0)):
             try:
                 time_read = time.time()
-
-                if no_data_timeout and curr_time + no_data_timeout < self.get_float_time():
-                    raise NoDataTimeout("Received no data for %0.1f second(s)" % no_data_timeout)
+                if (
+                    no_data_timeout
+                    and curr_time + no_data_timeout < self.get_float_time()
+                ):
+                    raise NoDataTimeout(
+                        "Received no data for %0.1f second(s)" % no_data_timeout
+                    )
 
                 data = self.read_data()
                 n_words = data.shape[0]
                 self._record_count += n_words
-
             except Exception:
                 no_data_timeout = None
                 if self.errback:
@@ -95,7 +109,6 @@ class CustomFifoReadout(FifoReadout):
                     raise
                 if self.stop_readout.is_set():
                     break
-
             else:
                 if n_words == 0:
                     if self.stop_readout.is_set():
@@ -103,20 +116,20 @@ class CustomFifoReadout(FifoReadout):
                     continue
 
                 timestamp_begin, timestamp_end = self.update_timestamp()
-                status = 0
-                tags = self._make_tags(timestamp_begin, timestamp_end, status, int(n_words))
-
+                tags = self._make_tags(
+                    timestamp_begin,
+                    timestamp_end,
+                    status=0,
+                    n_words=int(n_words),
+                )
                 if self.send_array is not None:
                     self.send_array(data, tags)
-
                 self._words_per_read.append(n_words)
-
             finally:
                 time_wait = self.readout_interval - (time.time() - time_read)
-
-            if self._calculate_word_rate.is_set():
-                self._calculate_word_rate.clear()
-                self._word_rate_result.put(sum(self._words_per_read))
+                if self._calculate_word_rate.is_set():
+                    self._calculate_word_rate.clear()
+                    self._word_rate_result.put(sum(self._words_per_read))
 
         self.log.debug("Stopped %s", self.readout_thread.name)
 
@@ -136,28 +149,6 @@ class CustomSourceScan(SourceScan):
         )
         self._first_read = False
 
-def _make_serializable(obj):
-    """Recursively convert an object into a JSON-serializable structure."""
-    if isinstance(obj, dict):
-        return {k: _make_serializable(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_make_serializable(v) for v in obj]
-    if isinstance(obj, np.ndarray):
-        # Store dtype, shape, and data as a list
-        return {
-            "__numpy__": True,
-            "dtype": str(obj.dtype),
-            "shape": list(obj.shape),
-            "data": obj.tolist(),
-        }
-    if isinstance(obj, np.generic):
-        # Scalar numpy types
-        return obj.item()
-    # Basic JSON-safe types
-    if isinstance(obj, (str, int, float, bool, type(None))):
-        return obj
-    # Fallback: coerce to string
-    return str(obj)
 
 class TJMonopix2(TransmitterSatellite):
     def __init__(self, *args, **kwargs):
@@ -167,7 +158,10 @@ class TJMonopix2(TransmitterSatellite):
 
     def _send_array(self, data, tags):
         if not self.can_send_record():
-            self.log.warning("Cannot send record right now, dropping chunk with %d words", data.shape[0])
+            self.log.warning(
+                "Cannot send record right now, dropping chunk with %d words",
+                data.shape[0],
+            )
             return
 
         record = self.new_data_record(tags)
@@ -205,7 +199,9 @@ class TJMonopix2(TransmitterSatellite):
             if self.src_scan is not None:
                 self.src_scan.close()
         except Exception:
-            self.log.exception("Ignoring exception while closing existing scan during initialization")
+            self.log.exception(
+                "Ignoring exception while closing existing scan during initialization"
+            )
 
         self._load_config(config)
         self.src_scan = self._make_scan()
@@ -221,9 +217,7 @@ class TJMonopix2(TransmitterSatellite):
             self.src_scan._init_hardware(force=False)
             self.src_scan.initialized = True
             self.src_scan.configure()
-
             return "launching done"
-
         except Exception:
             self.log.exception("do_launching failed")
             raise
@@ -294,13 +288,14 @@ class TJMonopix2(TransmitterSatellite):
         if self.thread_scan is not None and self.thread_scan.is_alive():
             self.thread_scan.join(timeout=10)
 
-
     def do_reconfigure(self, config: Configuration) -> str:
         if self.src_scan is not None:
             try:
                 self.src_scan.close()
             except Exception:
-                self.log.exception("Ignoring exception while closing existing scan during reconfigure")
+                self.log.exception(
+                    "Ignoring exception while closing existing scan during reconfigure"
+                )
 
         self._load_config(config)
         self.src_scan = self._make_scan()
@@ -333,97 +328,60 @@ class TJMonopix2(TransmitterSatellite):
 
         with open(config.get_path(key="testbench_path", check_exists=True), "r") as f:
             self.bench_conf = yaml.full_load(f)
-            self.bench_conf["general"]["output_directory"] = config.get(key="output_directory")
-            self.bench_conf["modules"]["module_0"]["chip_0"]["chip_config_file"] = config.get("chip_config_file")
-            self.bench_conf["modules"]["module_0"]["chip_0"]["chip_sn"] = config.get("chip_sn")
-            self.bench_conf["modules"]["module_0"]["chip_0"]["send_data"] = config.get("send_data")
+            self.bench_conf["general"]["output_directory"] = config.get(
+                key="output_directory"
+            )
+            chip = self.bench_conf["modules"]["module_0"]["chip_0"]
+            chip["chip_config_file"] = config.get("chip_config_file")
+            chip["chip_sn"] = config.get("chip_sn")
+            chip["send_data"] = config.get("send_data")
             self.bench_conf["analysis"]["create_pdf"] = config.get("create_pdf")
 
     def _build_meta_payload(self, stage: str) -> dict:
-        """Build BOR payload containing configuration_in for each chip."""
+        """Build a BOR/EOR payload containing serialised ScanConfig objects."""
         assert stage in ["in", "out"]
         chips_config = {}
 
         for name, container in self.src_scan.chips.items():
-            # Activate this chip's handles on the scan so we can read
-            # self.src_scan.chip, self.src_scan.chip_settings, etc.
             self.src_scan._set_chip_handles(container)
+            try:
+                config = self._make_scan_config(container)
+                chips_config[name] = scan_config_to_payload(config)
+            finally:
+                self.src_scan._unset_chip_handles()
 
-            chips_config[name] = self._extract_chip_configuration(
-                container=container,
-                stage=stage,
-            )
-        self.src_scan._unset_chip_handles()
-
-        raw_payload = {
+        return {
             "chips": chips_config,
             "run_identifier": getattr(self.src_scan, "run_name", None),
         }
-        return _make_serializable(raw_payload)
 
-    def _extract_chip_configuration(
-        self,
-        container,
-        stage: str,
-    ) -> dict:
-        """Extract a ScanBase-compatible configuration dict for one chip."""
+    def _make_scan_config(self, container) -> ScanConfig:
+        """Build one shared ScanConfig from the live ScanBase state."""
         scan = self.src_scan
-
-        # Basic run metadata
-        scan_id = getattr(scan, "scan_id", "")
-        run_name = getattr(scan, "run_name", "")
-        software_version = self._get_software_version()
-
-        # Chip-level settings already present on the container / scan
-        chip_settings = dict(container.chip_settings)
-        module_settings = dict(container.module_settings)
-        scan_config = dict(container.scan_config)
-
-        # Registers and masks come from the live chip object
         chip = scan.chip
-        registers = {
-            name: str(reg.get())
-            for name, reg in chip.registers.items()
-        }
 
-        masks = {
-            name: mask.copy()
-            for name, mask in chip.masks.items()
-        }
-
-        use_pixel = getattr(chip.masks, "disable_mask", None)
-        if use_pixel is not None:
-            use_pixel = use_pixel.copy()
-
-        # Bench configuration is stored on the scan
-        bench_configuration = dict(scan.configuration.get("bench", {}))
-
-        # Assemble into the same logical structure that ScanBase writes:
-        return {
-            "scan": {
-                "run_config": {
-                    "scan_id": scan_id,
-                    "run_name": run_name,
-                    "software_version": software_version,
-                    "module": module_settings.get("name", ""),
-                    "chip_sn": chip_settings.get("chip_sn", container.name),
-                    "receiver": chip_settings.get("receiver", ""),
-                },
-                "scan_config": {
-                    k: v
-                    for k, v in scan_config.items()
-                    if k not in ("chip",)
-                },
+        return ScanConfig(
+            run_config={
+                "scan_id": scan.scan_id,
+                "run_name": scan.run_name,
+                "software_version": self._get_software_version(),
+                "module": container.module_settings["name"],
+                "chip": chip.get_sn(),
+                "chip_sn": chip.get_sn(),
+                "receiver": chip.receiver,
             },
-            "chip": {
-                "registers": registers,
-                "settings": chip_settings,
-                "module": module_settings,
-                "masks": masks,
-                "use_pixel": use_pixel,
-            },
-            "bench": bench_configuration,
-        }
+            scan_config=dict(container.scan_config),
+            chip_settings=dict(container.chip_settings),
+            module_settings=dict(container.module_settings),
+            registers={name: reg.get() for name, reg in chip.registers.items()},
+            masks={name: value.copy() for name, value in chip.masks.items()},
+            use_pixel=(
+                chip.masks.disablemask.copy()
+                if getattr(chip.masks, "disablemask", None) is not None
+                else None
+            ),
+            bench_config=dict(scan.configuration["bench"]),
+        )
 
     @staticmethod
     def _get_software_version() -> str:
