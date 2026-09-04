@@ -81,6 +81,7 @@ send_data= "tcp://127.0.0.1:5500" # Socket address of online monitor
 
 [TJMonoPix2.chip0._data]
 bor_timeout = 30
+eor_timeout = 30
 data_timeout = 30
 
 [Keithley.2410]

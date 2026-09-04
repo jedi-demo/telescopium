@@ -226,7 +226,7 @@ class TJMonopix2(TransmitterSatellite):
             self.log.exception("Failed to build BOR payload")
             raise
 
-        return "Started"
+        return "Starting"
 
     def do_stopping(self) -> str:
         self.eor = self._build_meta_payload("out")
@@ -277,34 +277,25 @@ class TJMonopix2(TransmitterSatellite):
 
         return "running done"
 
-    # def do_stop(self) -> str:
-    #     if hasattr(self.src_scan, "stop_scan"):
-    #         self.src_scan.stop_scan.set()
-    #
-    #     if getattr(self.src_scan, "fifo_readout", None) is not None:
-    #         self.src_scan.fifo_readout.stop_readout.set()
-    #         self.src_scan.fifo_readout.force_stop.set()
-    #
-    #     if self.thread_scan is not None and self.thread_scan.is_alive():
-    #         self.thread_scan.join(timeout=10)
-
     def do_stop(self) -> str:
-        try:
-            if hasattr(self.src_scan, "stop_scan"):
-                self.src_scan.stop_scan.set()
+        self.log.info("Do_stop")
+        # try:
+        if hasattr(self.src_scan, "stop_scan"):
+            self.src_scan.stop_scan.set()
 
-            if getattr(self.src_scan, "fifo_readout", None) is not None:
-                self.src_scan.fifo_readout.stop_readout.set()
-                self.src_scan.fifo_readout.force_stop.set()
+        if getattr(self.src_scan, "fifo_readout", None) is not None:
+            self.src_scan.fifo_readout.stop_readout.set()
+            self.src_scan.fifo_readout.force_stop.set()
 
-            if self.thread_scan is not None:
-                self.thread_scan.join(timeout=10)
+        if self.thread_scan is not None and self.thread_scan.is_alive():
+            self.thread_scan.join(timeout=30)
 
-                if self.thread_scan.is_alive():
-                    raise RuntimeError("Scan thread did not stop")
-        finally:
-            if self.src_scan is not None:
-                self.src_scan.close()
+            if self.thread_scan.is_alive():
+                raise RuntimeError("Scan thread did not stop")
+
+        # finally:
+        if self.src_scan is not None:
+            self.src_scan.close()
 
         return "Stopped"
 
