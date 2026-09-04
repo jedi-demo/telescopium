@@ -13,7 +13,7 @@ import numpy as np
 import yaml
 
 from tjmonopix2 import utils
-from tjmonopix2.scan_config import ScanConfig, scan_config_to_payload
+from tjmonopix2.system.scan_config import ScanConfig, scan_config_to_payload, find_out_of_range_integers
 from tjmonopix2.scans.scan_source import SourceScan
 from tjmonopix2.system.fifo_readout import FifoReadout, NoDataTimeout
 
@@ -213,9 +213,6 @@ class TJMonopix2(TransmitterSatellite):
                 raise RuntimeError("src_scan is None before launch")
 
             self.src_scan.init()
-            self.src_scan._init_environment()
-            self.src_scan._init_hardware(force=False)
-            self.src_scan.initialized = True
             self.src_scan.configure()
             return "launching done"
         except Exception:
@@ -223,8 +220,12 @@ class TJMonopix2(TransmitterSatellite):
             raise
 
     def do_starting(self, run_identifier: str) -> str:
-        self.bor = self._build_meta_payload("in")
-        self.log.info(self.bor)
+        try:
+            self.bor = self._build_meta_payload("in")
+        except Exception:
+            self.log.exception("Failed to build BOR payload")
+            raise
+
         return "Started"
 
     def do_stopping(self) -> str:
@@ -258,7 +259,6 @@ class TJMonopix2(TransmitterSatellite):
     def do_run(self, payload=None) -> str:
         self.send_test_packets()
 
-        self.src_scan._init_files()
         if hasattr(self.src_scan, "stop_scan"):
             self.src_scan.stop_scan.clear()
 
@@ -277,16 +277,36 @@ class TJMonopix2(TransmitterSatellite):
 
         return "running done"
 
+    # def do_stop(self) -> str:
+    #     if hasattr(self.src_scan, "stop_scan"):
+    #         self.src_scan.stop_scan.set()
+    #
+    #     if getattr(self.src_scan, "fifo_readout", None) is not None:
+    #         self.src_scan.fifo_readout.stop_readout.set()
+    #         self.src_scan.fifo_readout.force_stop.set()
+    #
+    #     if self.thread_scan is not None and self.thread_scan.is_alive():
+    #         self.thread_scan.join(timeout=10)
+
     def do_stop(self) -> str:
-        if hasattr(self.src_scan, "stop_scan"):
-            self.src_scan.stop_scan.set()
+        try:
+            if hasattr(self.src_scan, "stop_scan"):
+                self.src_scan.stop_scan.set()
 
-        if getattr(self.src_scan, "fifo_readout", None) is not None:
-            self.src_scan.fifo_readout.stop_readout.set()
-            self.src_scan.fifo_readout.force_stop.set()
+            if getattr(self.src_scan, "fifo_readout", None) is not None:
+                self.src_scan.fifo_readout.stop_readout.set()
+                self.src_scan.fifo_readout.force_stop.set()
 
-        if self.thread_scan is not None and self.thread_scan.is_alive():
-            self.thread_scan.join(timeout=10)
+            if self.thread_scan is not None:
+                self.thread_scan.join(timeout=10)
+
+                if self.thread_scan.is_alive():
+                    raise RuntimeError("Scan thread did not stop")
+        finally:
+            if self.src_scan is not None:
+                self.src_scan.close()
+
+        return "Stopped"
 
     def do_reconfigure(self, config: Configuration) -> str:
         if self.src_scan is not None:
@@ -346,6 +366,10 @@ class TJMonopix2(TransmitterSatellite):
             self.src_scan._set_chip_handles(container)
             try:
                 config = self._make_scan_config(container)
+                ### debug
+                for path, value in find_out_of_range_integers(config.__dict__):
+                    self.log.error("BOR/EOR integer outside MessagePack range: %s = %r", path, value)
+                ### debug end
                 chips_config[name] = scan_config_to_payload(config)
             finally:
                 self.src_scan._unset_chip_handles()

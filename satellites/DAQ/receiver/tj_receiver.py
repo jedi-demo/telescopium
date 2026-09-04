@@ -27,13 +27,14 @@ from constellation.core.message.cdtp2 import DataRecord
 from constellation.core.monitoring import schedule_metric
 from constellation.core.receiver_satellite import ReceiverSatellite
 
-from tjmonopix2.scan_config import ScanConfig, scan_config_from_payload
-from tjmonopix2.scan_config_h5 import write_scan_config_to_h5
-
-# Copied from tjmonopix2.scan_base.
-FILTER_RAW_DATA = tb.Filters(complib="blosc", complevel=5, fletcher32=False)
-FILTER_TABLES = tb.Filters(complib="zlib", complevel=5, fletcher32=False)
-
+from tjmonopix2.system.scan_config_h5 import write_scan_config_to_h5
+from tjmonopix2.system.scan_config import (
+    ScanConfig,
+    scan_config_from_payload,
+    FILTER_RAW_DATA,
+    FILTER_TABLES,
+    RunConfigTable,
+)
 
 class MetaTable(tb.IsDescription):
     """Metadata table schema expected by downstream ScanBase analysis."""

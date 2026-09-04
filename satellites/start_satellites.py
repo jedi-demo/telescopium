@@ -43,12 +43,12 @@ SESSIONS = {
                 group="dcs",
                 name="DB",
             ),
-            # Satellite(
-            #     window="Keithley2410",
-            #     module="DCS.Keithley",
-            #     group="dcs",
-            #     name="Keithley2410",
-            # ),        
+        #     # Satellite(
+        #     #     window="Keithley2410",
+        #     #     module="DCS.Keithley",
+        #     #     group="dcs",
+        #     #     name="Keithley2410",
+        #     # ),        
         ],
     },
     "daq": {
@@ -78,6 +78,12 @@ SESSIONS = {
                 module="DAQ.data_record_sender",
                 group="daq",
                 name="chip1",
+            ),
+            Satellite(
+                window="fake_data_chip2",
+                module="DAQ.data_record_sender",
+                group="daq",
+                name="chip2",
             ),
         ],
     },
