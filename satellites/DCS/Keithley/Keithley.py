@@ -192,7 +192,35 @@ class Keithley(Satellite):
         """Read voltage and current output"""
         voltage, current, timestamp = self.device.read_output()
         return f"Output: {voltage}V, {current}A", {"voltage": voltage, "current": current, "timestamp": timestamp}, {}
+    _alive_failures: int = 0
 
+    @schedule_metric("", 2)
+    def DEVICE_ALIVE(self) -> bool:
+        # Solo vigilar en ORBIT / RUN y con dispositivo creado
+        if not hasattr(self, "device") or self.fsm.state.name not in ("ORBIT", "RUN"):
+            self._alive_failures = 0
+            return True
+
+        try:
+            alive = bool(self.device.identify())
+        except Exception as e:
+            alive = False
+            self.log.warning(f"Keithley not responding: {e}")
+
+        self._alive_failures = 0 if alive else self._alive_failures + 1
+        if self._alive_failures >= 1:
+            self._on_connection_lost()
+        return alive
+
+    def _on_connection_lost(self) -> None:
+        msg = "Lost connection to Keithley"
+        try:
+            self.fsm.failure(msg)
+            self._wrap_failure(msg)
+        except Exception as e:
+            self.log.error(f"Could not enter ERROR state: {e}")
+        self.log.critical(msg)
+        
     @schedule_metric("V", 5)
     def VOLTAGE(self) -> float | None:
         return self.device.read_output()[0]
@@ -204,3 +232,4 @@ class Keithley(Satellite):
     @schedule_metric("", 5)
     def IN_COMPLIANCE(self) -> float | None:
         return self.device.in_compliance()
+    
