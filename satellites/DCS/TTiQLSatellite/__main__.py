@@ -1,5 +1,5 @@
 """
-SPDX-FileCopyrightText: 2024 DESY and the Constellation authors
+SPDX-FileCopyrightText: 2026 PixLab, IFIC(CSIC-UV)
 SPDX-License-Identifier: EUPL-1.2
 
 Provides the entry point for the AIM-TTi QL355TP power supply satellite.

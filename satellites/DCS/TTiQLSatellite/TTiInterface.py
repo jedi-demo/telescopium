@@ -1,5 +1,5 @@
 """
-SPDX-FileCopyrightText: 2024 DESY and the Constellation authors
+SPDX-FileCopyrightText: 2026 PixLab, IFIC(CSIC-UV)
 SPDX-License-Identifier: EUPL-1.2
 
 Abstract TCP/IP socket interface for AIM-TTi QL355TP power supplies.
@@ -10,9 +10,8 @@ import socket
 import time
 from threading import Lock
 
-class TTiInterface(metaclass=ABCMeta):
-    # 
-    def __init__(self, ip_address: str, timeout: float = 5.0):
+class TTiInterface(metaclass=ABCMeta): 
+    def __init__(self, ip_address: str, timeout: float = 0.5):
         self._ip = ip_address
         self._port = 9221
         self._timeout = timeout
@@ -20,57 +19,59 @@ class TTiInterface(metaclass=ABCMeta):
         self._lock = Lock()
 
     # Network helper functions
-
+    def _connect_unlocked(self):
+        if self._socket is None:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(self._timeout)
+            try:
+                s.connect((self._ip, self._port))
+            except Exception:
+                s.close()
+                raise
+            self._socket = s
+            
+    def _close_unlocked(self):
+        if self._socket:
+            try:
+                self._socket.close()
+            except OSError:
+                pass
+            self._socket = None
+                
     def connect(self):
         """
         Establish TCP/IP socket connection to the device
         """
         with self._lock:
-            if self._socket is None:
-                try:
-                    self._socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    self._socket.settimeout(self._timeout)
-                    self._socket.connect((self._ip, self._port))
-                except Exception as e:
-                    self._socket = None
-                    print(f"Socket Connection Error {self._ip}:{self._port} -> {e}")
-                    raise
+            self._connect_unlocked()
 
     def close(self):
         """
         Close TCP/IP socket connection    
         """
         with self._lock:
-            if self._socket:
-                try:
-                    self._socket.close()
-                except:
-                    pass
-                self._socket = None
+            self._close_unlocked()
 
     def _write(self, command: str):
         """
         Write command to socket
         """
-        if not self._socket: self.connect()
-        
         with self._lock:
+            self._connect_unlocked()
             try:
                 msg = f"{command}\n".encode('ascii')
                 self._socket.sendall(msg)
-                time.sleep(0.05)
-            except (BrokenPipeError, ConnectionResetError, socket.error):
-                self.close()
-                self.connect()
-                self._socket.sendall(f"{command}\n".encode('ascii'))
+            except OSError:
+                self._close_unlocked()
+                raise
+            time.sleep(0.05)
 
     def _query(self, command: str) -> str:
         """
         Query the device and return the response
         """
-        if not self._socket: self.connect()
-        
         with self._lock:
+            self._connect_unlocked()
             try:
                 # Send
                 self._socket.sendall(f"{command}\n".encode('ascii'))
@@ -80,17 +81,14 @@ class TTiInterface(metaclass=ABCMeta):
 
                 # Read
                 response = self._socket.recv(1024)
-                return response.decode('ascii').strip()
+            except OSError:
+                self._close_unlocked()
+                raise
+            if not response:
+                self._close_unlocked()
+                raise ConnectionError("Connection closed by device")   
+            return response.decode('ascii').strip()
                 
-            except (BrokenPipeError, ConnectionResetError, socket.error) as e:
-                print(f"Socket lost: {e}. Reconnecting...")
-                self.close()
-                self.connect()
-                
-                # Retry
-                self._socket.sendall(f"{command}\n".encode('ascii'))
-                time.sleep(0.3)
-                return self._socket.recv(1024).decode('ascii').strip()
     
     # Device functions
 

@@ -1,5 +1,5 @@
 """
-SPDX-FileCopyrightText: 2024 DESY and the Constellation authors
+SPDX-FileCopyrightText: 2026 PixLab, IFIC(CSIC-UV)
 SPDX-License-Identifier: EUPL-1.2
 
 Network interface for an AIM-TTi QL355TP Series II power supply.

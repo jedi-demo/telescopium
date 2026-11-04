@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2024 DESY and the Constellation authors
+# SPDX-FileCopyrightText: 2026 PixLab, IFIC(CSIC-UV) 
 # SPDX-License-Identifier: CC0-1.0
 
 tti_files = files(

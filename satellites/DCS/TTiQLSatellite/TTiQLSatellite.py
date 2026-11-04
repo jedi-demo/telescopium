@@ -1,5 +1,5 @@
 """
-SPDX-FileCopyrightText: 2024 DESY and the Constellation authors
+SPDX-FileCopyrightText: 2026 PixLab, IFIC(CSIC-UV)
 SPDX-License-Identifier: EUPL-1.2
 
 Provides the class for the AIM-TTi QL355TP  satellite.
@@ -12,7 +12,6 @@ from constellation.core.configuration import Configuration
 from constellation.core.satellite import Satellite
 from constellation.core.commandmanager import cscp_requestable
 from constellation.core.fsm import SatelliteState
-from constellation.core.message.cscp1 import CSCP1Message
 from constellation.core.monitoring import schedule_metric
 
 from .QL355TPII import QL355TPII
@@ -30,6 +29,7 @@ class TTiQLSatellite(Satellite):
         super().__init__(*args, **kwargs)
         self.device = None
         self.ip = None
+        self._alive_failures = 0
 
     def do_initializing(self, config: Configuration) -> str:
         """Read configuration, establish connection, and apply limits."""
@@ -232,7 +232,31 @@ class TTiQLSatellite(Satellite):
     # --------------------------------------------------------------------------
     # METRICS
     # --------------------------------------------------------------------------
-
+    @schedule_metric("", sampling_interval)
+    def IS_ALIVE(self):
+        if self.device is None:
+            return False
+        try:
+            alive = bool(self.device.identify())
+        except Exception as e:
+            self.log.warning(f"TTi not responding: {e}")
+            alive = False
+        if alive:
+            self._alive_failures = 0
+        else:
+            self._alive_failures += 1
+            if self._alive_failures >= 3:
+                if self.fsm.state == SatelliteState.ERROR:
+                    returm
+                msg = "Lost connection to TTi"
+                try:
+                    self.fsm.failure(msg)
+                    self._wrap_failure(msg)
+                except Exception as e:
+                    self.log.error(f"Could not enter Error state: {e}")
+                self.log.critical(msg)
+        return alive
+        
     @schedule_metric("V", sampling_interval)
     def CH1_V(self):
         if self.device: return self.device.get_voltage_readback(1)
@@ -271,23 +295,14 @@ class TTiQLSatellite(Satellite):
                 self.log.warning(f"Device Error Code: {err}")
             return err
         return 0
-
+        
     # --------------------------------------------------------------------------
     # CUSTOM COMMANDS
     # --------------------------------------------------------------------------
 
     @cscp_requestable
-    def set_live_voltage(self, request: CSCP1Message) -> tuple[str, Any, dict]:
+    def set_live_voltage(self, channel: int, voltage: float) -> tuple[str, Any, dict]:
         """Change the target voltage of a specific channel dynamically."""
-        data = request.payload
-        channel = 1
-        voltage = 0.0
-
-        if isinstance(data, (int, float)):
-            voltage = float(data)
-        elif isinstance(data, dict):
-            channel = data.get("ch", 1)
-            voltage = float(data.get("v", 0.0))
         
         if self.device:
             self.device.set_voltage(channel, voltage)
@@ -297,18 +312,8 @@ class TTiQLSatellite(Satellite):
             return "Error: Device not connected", None, {}
 
     @cscp_requestable
-    def set_live_current(self, request: CSCP1Message) -> tuple[str, Any, dict]:
+    def set_live_current(self, channel: int, voltage: float) -> tuple[str, Any, dict]:
         """Change the current limit of a specific channel dynamically."""
-        data = request.payload
-        channel = 1
-        current = 0.0
-
-        if isinstance(data, (int, float)):
-            current = float(data)
-        elif isinstance(data, dict):
-            channel = data.get("ch", 1)
-            current = float(data.get("i", 0.0))
-
         if self.device:
             self.device.set_current_limit(channel, current)
             self.log.info(f"Live Current CH{channel} -> {current} A")
@@ -316,18 +321,8 @@ class TTiQLSatellite(Satellite):
         return "Error", None, {}
 
     @cscp_requestable
-    def set_output_state(self, request: CSCP1Message) -> tuple[str, Any, dict]:
+    def set_output_state(self, channel: int, voltage: bool) -> tuple[str, Any, dict]:
         """Turn a specific channel ON or OFF dynamically."""
-        data = request.payload
-        channel = 1
-        state = False
-        
-        if isinstance(data, bool) or isinstance(data, int):
-            state = bool(data)
-        elif isinstance(data, dict):
-            channel = data.get("ch", 1)
-            state = bool(data.get("on", False))
-
         if self.device:
             self.device.set_output(channel, state)
             s_str = "ON" if state else "OFF"

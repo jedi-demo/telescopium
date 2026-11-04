@@ -1,8 +1,11 @@
 ---
-# SPDX-FileCopyrightText: 2024 DESY and the Constellation authors
+# SPDX-FileCopyrightText: 2026 PixLab, IFIC(CSIC-UV) 
 # SPDX-License-Identifier: CC-BY-4.0 OR EUPL-1.2
 title: "TTiQL"
 description: "Satellite controlling an AIM-TTi QL355TP power supply"
+category: "Power Supplies"
+language: "Python"
+parent_class: "Satellite"
 ---
 
 ## Description
@@ -33,7 +36,7 @@ Supports dual independent outputs with dynamic voltage and current limit adjustm
 | `ip` | IP address of the instrument on the network | String | 192.168.1.15 |
 | `enable_ch1` | Enable output for Channel 1 on launch | Bool | `true` / `false` |
 | `enable_ch2` | Enable output for Channel 2 on launch | Bool | `true` / `false` |
-| `launch_order` | Sequence order for turning on channels | List | `[1, 2]` / `[2, 1]` |
+| `launch_order` | Sequence order for turning on channels | List | `[1, 2]` / `[2, 1]` / `["both"]` |
 | `delay_between`| Time to wait between turning on channels (in seconds) | Float | `1.0` |
 | `start_delay` | Initial safety delay before starting launch sequence (in seconds) | Float | `0.0` |
 | `ramp_ch1` | Enable voltage ramping for Channel 1 | Bool | `true` / `false` |
@@ -51,15 +54,16 @@ Supports dual independent outputs with dynamic voltage and current limit adjustm
 
 ## Metrics
 
-| Metric | Description | Value Type | Metric Type | Interval |
-|--------|-------------|------------|-------------|----------|
-| `CH1_V` | Voltage output readback Channel 1 | Float | `LAST_VALUE` | 2.0s |
-| `CH1_I` | Current output readback Channel 1 | Float | `LAST_VALUE` | 2.0s |
-| `CH1_STAT` | Limit Status Register Channel 1 | Integer | `LAST_VALUE` | 2.0s |
-| `CH2_V` | Voltage output readback Channel 2 | Float | `LAST_VALUE` | 2.0s |
-| `CH2_I` | Current output readback Channel 2 | Float | `LAST_VALUE` | 2.0s |
-| `CH2_STAT` | Limit Status Register Channel 2 | Integer | `LAST_VALUE` | 2.0s |
-| `LAST_ERROR`| Execution Error Code | Integer | `LAST_VALUE` | 2.0s |
+| Metric | Description | Value Type | Interval |
+|--------|-------------|------------|----------|
+| `CH1_V` | Voltage output readback Channel 1 | Float | 2.0s |
+| `CH1_I` | Current output readback Channel 1 | Float | 2.0s |
+| `CH1_STAT` | Limit Status Register Channel 1 | Integer | 2.0s |
+| `CH2_V` | Voltage output readback Channel 2 | Float | 2.0s |
+| `CH2_I` | Current output readback Channel 2 | Float | 2.0s |
+| `CH2_STAT` | Limit Status Register Channel 2 | Integer | 2.0s |
+| `LAST_ERROR`| Execution Error Code | Integer | 2.0s |
+| `IS_ALIVE`| Checks if the unit answers (only checked in `ORBIT` and `RUN`) | Bool | 2.0s |
 
 ## Custom Commands
 
