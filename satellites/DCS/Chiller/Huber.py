@@ -1,5 +1,5 @@
 """
-SPDX-FileCopyrightText: 2026 DESY and the Constellation authors
+SPDX-FileCopyrightText: 2026 PixLab, IFIC (CSIC-UV)
 SPDX-License-Identifier: EUPL-1.2
 
 Provides the class for the Huber chiller satellite

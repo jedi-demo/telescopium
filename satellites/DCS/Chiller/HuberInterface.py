@@ -1,5 +1,5 @@
 """
-SPDX-FileCopyrightText: 2026 DESY and the Constellation authors
+SPDX-FileCopyrightText: 2026 PixLab, IFIC (CSIC-UV)
 SPDX-License-Identifier: EUPL-1.2
 
 Abstract serial interface for Huber temperature control units.
